@@ -1,0 +1,36 @@
+// Lark grammar for parsing ASP plan facts
+// Handles structures like: occurs(action(("navigate", constant("rover1"), constant("waypoint3"), constant("waypoint0"))), 1)
+
+start: fact+
+
+fact: predicate "."?
+
+predicate: ATOM "(" args? ")"
+
+args: arg ("," arg)*
+
+arg: predicate          // nested predicate like action(...)
+   | tuple              // tuple like ("navigate", ...)
+   | constant           // constant("value")  
+   | atom               // simple atom like rover1
+   | number             // integer like 1
+   | string             // quoted string
+
+tuple: "(" args? ")"
+
+constant: "constant" "(" (string | atom) ")"
+
+atom: ATOM
+
+number: SIGNED_INT | INT
+
+string: ESCAPED_STRING
+
+// Terminals
+ATOM: /[a-z][a-zA-Z0-9_]*/
+ESCAPED_STRING: /"([^"\\\\]|\\\\.)*"/
+
+%import common.SIGNED_INT
+%import common.INT
+%import common.WS
+%ignore WS
