@@ -206,8 +206,15 @@ class Renamer(engines.engine.Engine, CompilerMixin):
         else:
             _renamed_fluent = self._fluents_map[expr._content.payload]
             _em = expr.environment.expression_manager
-            _renamed_args = tuple(_em.ParameterExp(Parameter(a._content.payload.name.replace('-','_'), self._types_map[a._content.payload.type])) for a in expr.args)
-            return _em.FluentExp(_renamed_fluent, _renamed_args)
+            _renamed_args = []
+            for a in expr.args:
+                if a.is_object_exp():
+                    _renamed_args.append(_em.ObjectExp(self._objects_map[a._content.payload.name]))
+                elif a.is_parameter_exp():
+                    _renamed_args.append(_em.ParameterExp(Parameter(a._content.payload.name.replace('-','_'), self._types_map[a._content.payload.type])))
+                else:
+                    raise NotImplementedError(f"Renamer cannot rename fluent argument of node type {a.node_type}: {a}")
+            return _em.FluentExp(_renamed_fluent, tuple(_renamed_args))
 
     def __rename_actions__(self, problem: Problem, new_problem: Problem) -> None:
         env = problem.environment
