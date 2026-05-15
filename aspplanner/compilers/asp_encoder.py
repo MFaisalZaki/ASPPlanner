@@ -147,9 +147,6 @@ class ASPEncoder(engines.engine.Engine, CompilerMixin):
         
         # last step rename all the fluents and actions to avoid name clashes with the ASP encoding.
         self.new_problem = Renamer().compile(self.new_problem).problem
-        
-        # now add the helper fluents for all dimensions.
-        self._add_helper_fluents(self.new_problem)
 
         # to make the ASP solver life's easier, we will create the helper fluent for the goal predicate.
         # this predicate once is set to true it remains true, and this is should be used only by
@@ -162,23 +159,23 @@ class ASPEncoder(engines.engine.Engine, CompilerMixin):
         # signature body lets the grounder pre-filter parameter bindings
         # by the static relation (see ASPAction docstring).
         modified_fluent_names = set()
-        for a in problem.actions:
+        for a in self.new_problem.actions:
             for eff in a.effects:
                 modified_fluent_names.add(eff.fluent._content.payload.name)
-        static_fluent_names = {f.name for f in problem.fluents if f.name not in modified_fluent_names}
+        static_fluent_names = {f.name for f in self.new_problem.fluents if f.name not in modified_fluent_names}
 
-        self.new_problem.asp_encoding['_types']          = set(ASPType(t) for t in problem.user_types)
+        self.new_problem.asp_encoding['_types']          = set(ASPType(t) for t in self.new_problem.user_types)
         self.new_problem.asp_encoding['_default_values'] = set(ASPBooleanType(v) for v in [True, False])
-        self.new_problem.asp_encoding['_constants']      = set(ASPConstant(obj) for obj in problem.all_objects)
-        self.new_problem.asp_encoding['_has']            = set(ASPHasConstant(obj) for obj in problem.all_objects)
-        self.new_problem.asp_encoding['_variables']      = set(ASPFluent(fluent) for fluent in problem.fluents)
-        self.new_problem.asp_encoding['_actions']        = set(ASPAction(action, static_fluent_names) for action in problem.actions)
-        self.new_problem.asp_encoding['_initial_state']  = set(ASPInitialState(fluent, value) for fluent, value in problem.initial_values.items() if not value.is_false())
-        self.new_problem.asp_encoding['_goal_state']     = set(chain.from_iterable(self._generate_asp_goal_state(g) for g in problem.goals))
+        self.new_problem.asp_encoding['_constants']      = set(ASPConstant(obj) for obj in self.new_problem.all_objects)
+        self.new_problem.asp_encoding['_has']            = set(ASPHasConstant(obj) for obj in self.new_problem.all_objects)
+        self.new_problem.asp_encoding['_variables']      = set(ASPFluent(fluent) for fluent in self.new_problem.fluents)
+        self.new_problem.asp_encoding['_actions']        = set(ASPAction(action, static_fluent_names) for action in self.new_problem.actions)
+        self.new_problem.asp_encoding['_initial_state']  = set(ASPInitialState(fluent, value) for fluent, value in self.new_problem.initial_values.items() if not value.is_false())
+        self.new_problem.asp_encoding['_goal_state']     = set(chain.from_iterable(self._generate_asp_goal_state(g) for g in self.new_problem.goals))
         
         # This is a corner case where the initial state has no true fluents. In this case we need to add all the fluents of the problem.
         if len(self.new_problem.asp_encoding['_initial_state']) == 0:
-            self.new_problem.asp_encoding['_initial_state'] = set(ASPInitialState(fluent, value) for fluent, value in problem.initial_values.items())
+            self.new_problem.asp_encoding['_initial_state'] = set(ASPInitialState(fluent, value) for fluent, value in self.new_problem.initial_values.items())
 
         for k, v in self.new_problem.asp_encoding.items():
             if 'constant' in k: self.new_problem.asp_encoding_str[k] = set(f'constant({e})' for e in chain.from_iterable(str(s).split('\n') for s in v))
@@ -241,49 +238,6 @@ class ASPEncoder(engines.engine.Engine, CompilerMixin):
             if eff.kind == EffectKind.INCREASE:
                 fixed_action.add_increase_effect(eff.fluent, eff.value, eff.condition, forall=eff.forall)
         return fixed_action
-
-    def _add_helper_fluents(self, problem: Problem):
-        _helper_prefix = 'helper_predicate_fts'
-        # For every goal fluent we need to add a helper fluent.
-        _em = problem.environment.expression_manager
-        _rename_fluent = lambda fluent, prefix: Fluent(f'{prefix}_{fluent.name}', fluent.type, OrderedDict([(arg.name, arg.type) for arg in fluent.signature]), environment=fluent.environment)
-        fluent_map = dict()
-        all_fluent_names = set()
-        for g in problem.goals:
-            fluentnames = NamesExtractor().extract_names(g)
-            for fluent in filter(lambda f: f.name in fluentnames, problem.fluents):
-                helper_fluent = _rename_fluent(fluent, _helper_prefix) 
-                problem.add_fluent(helper_fluent)
-                all_fluent_names.add(fluent.name)
-                if not fluent in fluent_map: fluent_map[fluent] = helper_fluent
-        
-        neg_goals = set()
-        for g in problem.goals:
-            for g_predicate in g.args if g.node_type != OperatorKind.NOT else g.args[0].args:
-                if g_predicate.node_type != OperatorKind.NOT: continue
-                neg_goals.add(g_predicate.args[0]._content.payload.name)
-        
-        # Now we need to update all actions that uses those fluents in their effects set to true.  
-        for action in problem.actions:
-            if not any([e in all_fluent_names for e in map(lambda e: e.fluent._content.payload.name, action.effects)]): continue
-            for eff in filter(lambda e: e.fluent._content.payload.name in all_fluent_names, action.effects):
-                assert eff.fluent._content.payload in fluent_map, "Fluent mapping error."
-                if (not (eff.value.is_false()) and not (eff.fluent._content.payload.name in neg_goals)) or ((eff.value.is_false()) and (eff.fluent._content.payload.name in neg_goals)): 
-                    # continue # we only care about setting to true.
-                    helper_expr = _em.FluentExp(fluent_map[eff.fluent._content.payload], eff.fluent.args)
-                    action.add_effect(helper_expr, eff.value, eff.condition, eff.forall)
-                else:
-                    pass # skip this effect
-        
-        # Check if any of the goal predicates are already in the initial state.
-        true_predicates_in_initial_state = list(filter(lambda f: not f[1].is_false(), problem.explicit_initial_values.items()))
-        for g in problem.goals:
-            fluentnames = NamesExtractor().extract_names(g)
-            if len(set.intersection(set(map(lambda f: f[0]._content.payload.name, true_predicates_in_initial_state)), fluentnames)) == 0: continue
-            # this means that there is a goal predicate that is already true in the initial state.
-            # set its helper fluent to true in the initial state.
-            for fluent, value in filter(lambda f: f[0]._content.payload in fluent_map.keys(), true_predicates_in_initial_state):
-                problem.set_initial_value(fluent_map[fluent._content.payload](*list(fluent.args)), value)
 
     def _generate_asp_goal_state(self, goal_state):
         goal_predicates = [goal_state] if goal_state.node_type != OperatorKind.AND else goal_state.args
