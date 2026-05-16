@@ -11,7 +11,7 @@ from unified_planning.engines.results import CompilerResult
 from unified_planning.model.problem_kind_versioning import LATEST_PROBLEM_KIND_VERSION
 from unified_planning.engines.compilers.utils import replace_action
 from unified_planning.shortcuts import OperatorKind, InstantaneousAction, FNode, Fluent, And
-from unified_planning.shortcuts import EffectKind
+from unified_planning.shortcuts import EffectKind, CompilationKind, Compiler
 from unified_planning.model.walkers.names_extractor import NamesExtractor
 from unified_planning.engines.compilers.quantifiers_remover import QuantifiersRemover
 from unified_planning.engines.compilers.disjunctive_conditions_remover import DisjunctiveConditionsRemover
@@ -132,9 +132,17 @@ class ASPEncoder(engines.engine.Engine, CompilerMixin):
         for a in problem.actions:
             self.new_problem.add_action(self._remove_delete_then_set(a))
         
-        self.new_problem = QuantifiersRemover().compile(self.new_problem).problem
-        self.new_problem = DisjunctiveConditionsRemover().compile(self.new_problem).problem
-        # note that disjunctive conditions remover decoples the conjunction of preconditions
+        compilationlist  = []
+        compilationlist += [["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING]]
+        compilationlist += [["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING]]
+        compilationlist += [["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING]]
+        compiler_names = [c[0] for c in compilationlist]
+        compiler_kinds = [c[1] for c in compilationlist]
+        with Compiler(names=compiler_names, compilation_kinds=compiler_kinds) as compiler:
+            self.grounded_problem = compiler.compile(self.new_problem)
+        
+        self.new_problem = self.grounded_problem.problem
+        # note that disjunctive conditions remover decouples the conjunction of preconditions
         # and this impacts the renamer.
         _actions = self.new_problem.actions.copy()
         self.new_problem.clear_actions()
