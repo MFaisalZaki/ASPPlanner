@@ -136,6 +136,7 @@ class ASPEncoder(engines.engine.Engine, CompilerMixin):
         compilationlist += [["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING]]
         compilationlist += [["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING]]
         compilationlist += [["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING]]
+        compilationlist += [["fast-downward-reachability-grounder", CompilationKind.GROUNDING]]
         compiler_names = [c[0] for c in compilationlist]
         compiler_kinds = [c[1] for c in compilationlist]
         with Compiler(names=compiler_names, compilation_kinds=compiler_kinds) as compiler:
