@@ -39,7 +39,8 @@ requires-python = ">=3.10"
 dependencies = [
     "clingo>=5.6.0",
     "unified-planning>=1.1.0",
-    "lark>=1.1.0"
+    "lark>=1.1.0",
+    "up_fast_downward>=0.5.2"
 ]
 
 [project.optional-dependencies]
