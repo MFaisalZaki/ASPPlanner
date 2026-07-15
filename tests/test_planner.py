@@ -88,14 +88,27 @@ def numeric_counter_problem(threshold=3):
 
 
 def assert_plan_is_over_original_problem(problem, plan):
-    """The plan must be stated in the original problem's vocabulary and
-    validate against the original problem."""
-    action_names = {a.name for a in problem.actions}
+    """The lifted plan must be stated in terms of the task passed to the
+    planner: every step references one of ITS action objects (identity, not
+    just an equal name), with matching arity, and every actual parameter is
+    an object of that task. The plan must also validate against it."""
+    original_actions = {id(a) for a in problem.actions}
+    original_objects = {o.name: o for o in problem.all_objects}
     for ai in plan.actions:
-        assert ai.action.name in action_names, (
-            f"plan action {ai.action.name!r} is not an action of the original "
-            f"problem {sorted(action_names)} -- map-back is broken"
+        assert id(ai.action) in original_actions, (
+            f"plan action {ai.action.name!r} is not (identically) an action "
+            f"of the original problem -- map-back is broken"
         )
+        assert len(ai.actual_parameters) == len(ai.action.parameters), (
+            f"{ai} has {len(ai.actual_parameters)} arguments but "
+            f"{ai.action.name} takes {len(ai.action.parameters)}"
+        )
+        for actual in ai.actual_parameters:
+            obj = actual.object()
+            assert original_objects.get(obj.name) == obj, (
+                f"plan argument {obj.name!r} of {ai} is not an object of the "
+                f"original problem"
+            )
     with PlanValidator(name="sequential_plan_validator") as validator:
         result = validator.validate(problem, plan)
     assert str(result.status) == "ValidationResultStatus.VALID", (
