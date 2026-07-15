@@ -4,11 +4,11 @@ A lightweight planner that solves automated planning problems by compiling them 
 
 ## Features
 
-- **UP integration**: registers itself as the `ASPPlanner` engine on import, usable through `OneshotPlanner` like any other UP planner.
-- **ASP-based search**: encodes the planning task into a logic program and lets clingo handle grounding and solving.
-- **Iterative-deepening horizon**: starts at horizon `0` and increases until a plan is found.
-- **Built-in validation**: every returned plan is checked with UP's `sequential_plan_validator` before being handed back.
-- **Broad problem support**: action-based, numeric, hierarchical typing, conditional effects, disjunctive/universal/existential conditions, increase/decrease effects, and more (see `UPASPPlanner.supported_kind`).
+- **UP integration**: registers itself as the `ASPPlanner` engine on import, usable through `OneshotPlanner` like any other UP planner. Honors the `timeout` argument and reports proper statuses (`SOLVED_SATISFICING`, `UNSOLVABLE_INCOMPLETELY`, `TIMEOUT`).
+- **Plans in your vocabulary**: returned plans reference the actions and objects of the problem you passed in — every internal compilation stage (grounding, type inference, renaming) is mapped back before the plan is handed over.
+- **Multi-shot ASP search**: iterative-deepening over the horizon using clingo's incremental (iclingo-style) interface — each new horizon grounds only one additional step instead of regrounding the whole program.
+- **Numeric planning**: integer-valued fluents with constant-delta `increase`/`decrease`/`assign` effects and linear comparison preconditions (simple numeric planning). Numeric tasks solve on the lifted encoding; classical tasks are pre-grounded with Fast Downward's reachability grounder.
+- **Built-in validation**: every returned plan is checked against the *original* problem with UP's `sequential_plan_validator` before being handed back.
 
 ## Installation
 
@@ -20,7 +20,7 @@ cd ASPPlanner
 pip install -e .
 ```
 
-Runtime dependencies (installed automatically): `clingo>=5.6.0`, `unified-planning>=1.1.0`, `lark>=1.1.0`.
+Runtime dependencies (installed automatically): `clingo>=5.6.0`, `unified-planning>=1.1.0`, `up_fast_downward>=0.5.2`.
 
 ## Usage
 
@@ -34,10 +34,12 @@ from unified_planning.shortcuts import OneshotPlanner
 
 # `problem` is any unified_planning.model.Problem you constructed or parsed.
 with OneshotPlanner(name="ASPPlanner") as planner:
-    result = planner.solve(problem)
+    result = planner.solve(problem, timeout=60)
     print(result.status)
     print(result.plan)
 ```
+
+Engine options: `params={"max_horizon": 50}` bounds the deepening search, and `params={"horizon": 10}` solves at one fixed horizon instead.
 
 ### Direct API
 
@@ -47,19 +49,41 @@ You can also drive the planner directly if you don't need the UP result wrapper:
 from aspplanner.asp_planner import ASPPlanner
 
 planner = ASPPlanner(problem, encoder_type="seq")
-plan = planner.plan()
+plan = planner.plan(max_horizon=100, timeout=60)   # or plan(horizon=10)
+print(planner.status)   # PlanGenerationResultStatus of the last call
+print(planner.logs)     # human-readable notes
 ```
 
-The `seq` encoder uses the bundled sequential horizon-based ASP encoding at [aspplanner/encodings/sequential-horizon.lp](aspplanner/encodings/sequential-horizon.lp).
+`plan()` always returns a `SequentialPlan`; it is empty when no plan was found (check `planner.status`) — or when the goal already holds in the initial state, in which case `status` is `SOLVED_SATISFICING`.
+
+To inspect or reuse the generated logic program (e.g. with your own clingo `Control`):
+
+```python
+text = planner.lp_program()          # task facts + multi-shot encoding, verbatim
+planner.dump_lp_program("task.lp")   # same, written to a file
+
+terms = planner.encoding_terms()     # encoding parsed into ASPTerm statements
+```
+
+`encoding_terms()` returns typed statements (`ASPFact`, `ASPRule`, `ASPConstraint`, `ASPWeakConstraint`, `ASPDirective`) wrapping clingo AST nodes — filter or rewrite them programmatically, then write them back out:
+
+```python
+from aspplanner.compilers.asp_facts import parse_lp_file, dump_lp
+
+terms = parse_lp_file("my-encoding.lp")
+rules = [t for t in terms if isinstance(t, ASPRule)]
+dump_lp(terms, "normalized.lp")   # also accepts fact-builder terms and plain strings
+```
+
+The encoding is split into `#program base / step(t) / check(t)` parts; ground `base` + `step(1..h)` + `check(h)` and set the external `query(h)` to true to solve at horizon `h`.
 
 ## Project layout
 
-- [aspplanner/asp_planner.py](aspplanner/asp_planner.py) — core solver loop (compile → ground → solve → extract → validate).
+- [aspplanner/asp_planner.py](aspplanner/asp_planner.py) — core solver loop (compile → incremental ground/solve → extract → map back → validate).
 - [aspplanner/up_asp_planner.py](aspplanner/up_asp_planner.py) — UP engine adapter and supported `ProblemKind`.
-- [aspplanner/compilers/](aspplanner/compilers/) — UP-to-ASP compilation pipeline (encoder, fact builders, renamer, TIM typing).
+- [aspplanner/compilers/](aspplanner/compilers/) — UP-to-ASP compilation pipeline (encoder, fact builders, TIM typing).
 - [aspplanner/encodings/](aspplanner/encodings/) — clingo encodings used by each encoder type.
-- [aspplanner/grammars/](aspplanner/grammars/) — Lark grammar for parsing ASP plan facts back into UP action instances.
-- [aspplanner/utilities.py](aspplanner/utilities.py) — plan parsing and validation helpers.
+- [tests/](tests/) — end-to-end tests (`pip install -e ".[dev]" && pytest`).
 
 ## License
 

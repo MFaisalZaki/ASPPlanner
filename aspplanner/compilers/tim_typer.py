@@ -2,21 +2,25 @@
 tim_typer.py
 ============
 
-A Unified Planning ``Compiler`` that performs flat-TIM type inference:
+A Unified Planning ``Compiler`` that performs TIM-style type inference:
 turns an untyped (or coarsely-typed) ``Problem`` into a ``Problem`` whose
-fluents, action parameters, and objects carry inferred types — one type
-per equivalence class of (fluent, argument-position) pairs.
+fluents, action parameters, and objects carry inferred types.
 
 Algorithm
 ---------
 
-  1. Initialise a Union-Find over every (fluent_name, arg_position).
-  2. For each action, every parameter unifies all (fluent, pos) pairs at
-     which it appears.
-  3. Each object unifies all (fluent, pos) pairs where it appears in
-     init / goals / action expressions.
-  4. Equality atoms (= a b) unify the classes touched by a and b.
-  5. Each resulting equivalence class becomes one ``UserType``.
+Property-space partitioning over Fast Downward reachability: the problem
+is grounded with FD's reachability grounder, objects are clustered by the
+*equal set* of (fluent, argument-position) pairs they inhabit across
+reachable atoms (true initial atoms, grounded action pre/effects, goals),
+and each cluster becomes one ``UserType``. Positions and action parameters
+that a single cluster inhabits get that cluster's type; ambiguous ones get
+the root type, so the typing only ever excludes bindings that reachability
+already proved impossible.
+
+When reachability grounding is unavailable (e.g. numeric tasks), the
+problem is returned unchanged: without reachability information a
+co-occurrence analysis cannot soundly exclude any binding.
 
 The plan back-mapping is the identity on action and object names — the
 type system changes, the action structure does not.
@@ -25,9 +29,7 @@ Limitations
 -----------
 
   * ``InstantaneousAction`` only (no durative actions, no quantifiers).
-  * Flat TIM, not full TIM — no property-space partitioning, no subtype
-    lattice. Domains with overloaded predicates (e.g. Logistics' ``at``
-    over packages/trucks/airplanes) collapse to a single class.
+  * No subtype lattice beyond one root + leaf clusters.
 
 Usage
 -----
@@ -48,6 +50,7 @@ Usage
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections import OrderedDict, defaultdict
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
@@ -55,6 +58,7 @@ from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 import unified_planning as up
 from unified_planning.engines.engine import Engine
 from unified_planning.engines.results import CompilerResult
+from unified_planning.exceptions import UPTypeError
 from unified_planning.io import PDDLReader, PDDLWriter
 from unified_planning.model import (
     Fluent,
@@ -67,46 +71,7 @@ from unified_planning.model import (
 from unified_planning.plans import ActionInstance
 from unified_planning.shortcuts import UserType, Compiler, CompilationKind
 
-
-# ---------------------------------------------------------------------------
-# Union-Find
-# ---------------------------------------------------------------------------
-
-class _UF:
-    def __init__(self) -> None:
-        self._p: Dict = {}
-        self._r: Dict = {}
-
-    def add(self, x) -> None:
-        if x not in self._p:
-            self._p[x] = x
-            self._r[x] = 0
-
-    def find(self, x):
-        self.add(x)
-        root = x
-        while self._p[root] != root:
-            root = self._p[root]
-        while self._p[x] != root:
-            nxt, self._p[x] = self._p[x], root
-            x = nxt
-        return root
-
-    def union(self, a, b) -> None:
-        ra, rb = self.find(a), self.find(b)
-        if ra == rb:
-            return
-        if self._r[ra] < self._r[rb]:
-            ra, rb = rb, ra
-        self._p[rb] = ra
-        if self._r[ra] == self._r[rb]:
-            self._r[ra] += 1
-
-    def classes(self) -> Dict:
-        out: Dict = defaultdict(set)
-        for k in list(self._p):
-            out[self.find(k)].add(k)
-        return dict(out)
+_LOGGER = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -232,19 +197,25 @@ class TIMTypeInferenceCompiler(Engine):
 
         # Property-space partitioning via FD reachability: groups objects by
         # the *equal set* of (fluent, position) pairs they actually inhabit
-        # across reachable atoms. Strictly stronger than the union-find
-        # flat-TIM, which collapses any two positions sharing a single object.
+        # across reachable atoms.
         grounded_problem = None
         try:
             grounded_problem = self._ground_problem(problem).problem
-        except Exception:
-            grounded_problem = None
+        except Exception as e:
+            _LOGGER.info(
+                "Reachability grounding unavailable (%s: %s); skipping type "
+                "inference.", type(e).__name__, e)
 
-        if grounded_problem is not None:
-            new_problem = self._infer_and_build_from_reachability(
-                problem, grounded_problem)
-        else:
-            new_problem = self._infer_and_build(problem)
+        if grounded_problem is None:
+            # Without reachability information, inference is either useless
+            # (walking materialized closed-world defaults puts every object
+            # in every position, collapsing to one type) or unsound (a
+            # co-occurrence analysis cannot prove an object is never needed
+            # in a position). Leave the problem untyped.
+            return CompilerResult(problem, lambda ai: ai, self.name)
+
+        new_problem = self._infer_and_build_from_reachability(
+            problem, grounded_problem)
 
         original_actions = {a.name: a for a in problem.actions}
         original_objects = {o.name: o for o in problem.all_objects}
@@ -300,8 +271,13 @@ class TIMTypeInferenceCompiler(Engine):
             for child in expr.args:
                 walk(child)
 
-        for fnode in grounded.initial_values:
-            walk(fnode)
+        # Walk only atoms that are actually TRUE initially: Problem.initial_values
+        # materializes closed-world defaults for every object x fluent
+        # combination, which would put every object in every position and
+        # collapse the partition to a single cluster.
+        for fnode, value in grounded.explicit_initial_values.items():
+            if not value.is_false():
+                walk(fnode)
         for action in grounded.actions:
             for pre in action.preconditions:
                 walk(pre)
@@ -449,183 +425,25 @@ class TIMTypeInferenceCompiler(Engine):
 
         empty: Dict[str, Parameter] = {}
         for fnode, value in problem.explicit_initial_values.items():
-            new.set_initial_value(
-                _rebuild(fnode, em, empty, new_fluents, new_objects),
-                _rebuild(value, em, empty, new_fluents, new_objects),
-            )
-
-        for goal in problem.goals:
-            new.add_goal(_rebuild(goal, em, empty, new_fluents, new_objects))
-
-        return new
-
-    # -----------------------------------------------------------------------
-    # Core: type inference + new-problem construction
-    # -----------------------------------------------------------------------
-
-    def _infer_and_build(self, problem: Problem) -> Problem:
-        uf = _UF()
-        for fluent in problem.fluents:
-            for i in range(fluent.arity):
-                uf.add((fluent.name, i))
-
-        object_pos: Dict[str, Set[Tuple[str, int]]] = defaultdict(set)
-        action_param_pos: Dict[str, Dict[str, Set[Tuple[str, int]]]] = {}
-
-        # ---- walk actions ----
-        for action in problem.actions:
-            if not isinstance(action, InstantaneousAction):
-                raise NotImplementedError(
-                    f"Only InstantaneousAction supported; got "
-                    f"{type(action).__name__}."
+            try:
+                new.set_initial_value(
+                    _rebuild(fnode, em, empty, new_fluents, new_objects),
+                    _rebuild(value, em, empty, new_fluents, new_objects),
                 )
-            param_pos: Dict[str, Set[Tuple[str, int]]] = defaultdict(set)
-            eq_groups: List[List[Tuple[str, str]]] = []
+            except UPTypeError:
+                # The inferred position types exclude this ground instance
+                # (its objects never inhabit the fluent's positions in any
+                # reachable atom). That can only be true of a default-valued
+                # entry -- a TRUE atom would have been walked as reachable
+                # and widened the position type -- so dropping it preserves
+                # the closed-world semantics.
+                if not value.is_false():
+                    raise
 
-            for pre in action.preconditions:
-                _collect(pre, param_pos, object_pos, eq_groups)
-            for eff in action.effects:
-                _collect(eff.fluent, param_pos, object_pos, eq_groups)
-                _collect(eff.value,  param_pos, object_pos, eq_groups)
-                if eff.condition is not None:
-                    _collect(eff.condition, param_pos, object_pos, eq_groups)
-
-            for positions in param_pos.values():
-                ps = list(positions)
-                for k in ps[1:]:
-                    uf.union(ps[0], k)
-
-            for sides in eq_groups:
-                lists: List[List[Tuple[str, int]]] = []
-                for kind, name in sides:
-                    src = param_pos if kind == 'param' else object_pos
-                    lst = list(src.get(name, set()))
-                    if lst:
-                        lists.append(lst)
-                if len(lists) < 2:
-                    continue
-                anchor = lists[0][0]
-                for lst in lists[1:]:
-                    uf.union(anchor, lst[0])
-
-            action_param_pos[action.name] = dict(param_pos)
-
-        # ---- init ----
-        for fnode in problem.initial_values:
-            if fnode.is_fluent_exp():
-                fname = fnode.fluent().name
-                for i, arg in enumerate(fnode.args):
-                    if arg.is_object_exp():
-                        object_pos[arg.object().name].add((fname, i))
-
-        # ---- goals ----
-        for goal in problem.goals:
-            _collect(goal, defaultdict(set), object_pos, [])
-
-        # ---- per-object union ----
-        for positions in object_pos.values():
-            ps = list(positions)
-            for k in ps[1:]:
-                uf.union(ps[0], k)
-
-        # ---- types ----
-        classes = uf.classes()
-        sorted_roots = sorted(classes, key=lambda r: sorted(classes[r])[0])
-        pos_to_typename: Dict[Tuple[str, int], str] = {}
-        for idx, root in enumerate(sorted_roots, start=1):
-            members = sorted(classes[root])
-            hint = members[0][0].lower().replace('-', '_')
-            tname = f"t{idx}_{hint}"
-            for m in members:
-                pos_to_typename[m] = tname
-
-        DEFAULT = "t_default"
-        type_objs = {}
-        for tname in set(pos_to_typename.values()) | {DEFAULT}:
-            type_objs[tname] = UserType(tname)
-
-        # ---- new problem ----
-        new = Problem(problem.name)
-        em = new.environment.expression_manager
-
-        # fluents
-        new_fluents: Dict[str, Fluent] = {}
-        for fluent in problem.fluents:
-            sig: "OrderedDict[str, up.model.types.Type]" = OrderedDict()
-            for i, p in enumerate(fluent.signature):
-                tname = pos_to_typename.get((fluent.name, i), DEFAULT)
-                sig[p.name] = type_objs[tname]
-            nf = Fluent(fluent.name, fluent.type, sig)
-            new_fluents[fluent.name] = nf
-            default = problem.fluents_defaults.get(fluent)
-            if default is not None:
-                new.add_fluent(nf, default_initial_value=default)
-            else:
-                new.add_fluent(nf)
-
-        # objects
-        new_objects: Dict[str, Object] = {}
-        for obj in problem.all_objects:
-            positions = object_pos.get(obj.name, set())
-            if positions:
-                anchor = next(iter(positions))
-                tname = pos_to_typename.get(anchor, DEFAULT)
-            else:
-                tname = DEFAULT
-            nobj = Object(obj.name, type_objs[tname])
-            new_objects[obj.name] = nobj
-            new.add_object(nobj)
-
-        # actions
-        for action in problem.actions:
-            ppos = action_param_pos.get(action.name, {})
-            params: "OrderedDict[str, up.model.types.Type]" = OrderedDict()
-            for p in action.parameters:
-                positions = ppos.get(p.name, set())
-                if positions:
-                    anchor = next(iter(positions))
-                    tname = pos_to_typename.get(anchor, DEFAULT)
-                else:
-                    tname = DEFAULT
-                params[p.name] = type_objs[tname]
-
-            new_action = InstantaneousAction(action.name, params)
-            param_map = {p.name: new_action.parameter(p.name)
-                         for p in action.parameters}
-
-            for pre in action.preconditions:
-                new_action.add_precondition(
-                    _rebuild(pre, em, param_map, new_fluents, new_objects))
-
-            for eff in action.effects:
-                f = _rebuild(eff.fluent, em, param_map, new_fluents, new_objects)
-                v = _rebuild(eff.value,  em, param_map, new_fluents, new_objects)
-                cond = (em.TRUE() if eff.condition is None
-                        else _rebuild(eff.condition, em, param_map,
-                                      new_fluents, new_objects))
-                if eff.is_increase():
-                    new_action.add_increase_effect(f, v, cond)
-                elif eff.is_decrease():
-                    new_action.add_decrease_effect(f, v, cond)
-                else:
-                    new_action.add_effect(f, v, cond)
-
-            new.add_action(new_action)
-
-        # init
-        empty: Dict[str, Parameter] = {}
-        for fnode, value in problem.explicit_initial_values.items():
-            new.set_initial_value(
-                _rebuild(fnode, em, empty, new_fluents, new_objects),
-                _rebuild(value, em, empty, new_fluents, new_objects),
-            )
-
-        # goals
         for goal in problem.goals:
             new.add_goal(_rebuild(goal, em, empty, new_fluents, new_objects))
 
         return new
-
 
 # ---------------------------------------------------------------------------
 # CLI

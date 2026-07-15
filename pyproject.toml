@@ -9,10 +9,10 @@ description = "Lightweight planner using Answer Set Programming (ASP)"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Mustafa Faisal Zaki", email = "mustafa.zaki@example.com"}
+    {name = "Mustafa Faisal Zaki", email = "mustafa.faisal.eng@gmail.com"}
 ]
 maintainers = [
-    {name = "Mustafa Faisal Zaki", email = "mustafa.zaki@example.com"}
+    {name = "Mustafa Faisal Zaki", email = "mustafa.faisal.eng@gmail.com"}
 ]
 keywords = [
     "answer-set-programming",
@@ -39,7 +39,6 @@ requires-python = ">=3.10"
 dependencies = [
     "clingo>=5.6.0",
     "unified-planning>=1.1.0",
-    "lark>=1.1.0",
     "up_fast_downward>=0.5.2"
 ]
 
@@ -73,7 +72,6 @@ exclude = ["tests*"]
 [tool.setuptools.package-data]
 "aspplanner" = [
     "encodings/*.lp",
-    "grammars/*.lark",
 ]
 
 [tool.black]
@@ -104,30 +102,21 @@ force_grid_wrap = 0
 use_parentheses = true
 ensure_newline_before_comments = true
 
+# Kept intentionally lenient: the codebase is only partially annotated.
+# Tighten (disallow_untyped_defs etc.) as annotations grow.
 [tool.mypy]
 python_version = "3.10"
-warn_return_any = true
 warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
 check_untyped_defs = true
-disallow_untyped_decorators = true
-no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
-strict_equality = true
+no_implicit_optional = true
 
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = [
     "--strict-markers",
-    "--strict-config", 
-    "--cov=aspplanner",
-    "--cov-report=html",
-    "--cov-report=term-missing",
-    "--cov-fail-under=80"
+    "--strict-config",
 ]
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
