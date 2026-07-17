@@ -12,7 +12,7 @@ from unified_planning.model import (
     Action,
 )
 
-from typing import Callable, Dict, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 from functools import partial
 
 from unified_planning.plans import ActionInstance
@@ -119,7 +119,7 @@ class ASPEncoder:
 
     name = "aspencoder"
 
-    def compile(self, problem: Problem) -> ASPEncodingResult:
+    def compile(self, problem: Problem, compilationlist: List[List[str]]) -> ASPEncodingResult:
         assert isinstance(problem, Problem)
 
         new_problem = problem.clone()
@@ -139,23 +139,6 @@ class ASPEncoder:
             delete_then_set_map[clean_action] = a
         map_backs.append(partial(replace_action, map=delete_then_set_map))
 
-        # Numeric tasks skip the grounding step entirely: the Fast Downward
-        # reachability grounder rejects them, and pre-grounding with UP's
-        # grounder only bloats the program — the lifted encoding already
-        # carries everything gringo needs to instantiate (action signature
-        # rules bind parameters via has(_, type(...)) and folded static
-        # preconditions prune the bindings). PDDL (:functions ...) parse as
-        # real-typed fluents; the fact builders accept them as long as every
-        # constant is integral (clingo terms are integers) and raise otherwise.
-        kind = new_problem.kind
-        numeric = kind.has_int_fluents() or kind.has_real_fluents()
-
-        compilationlist  = []
-        compilationlist += [["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING]]
-        compilationlist += [["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING]]
-        compilationlist += [["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING]]
-        if not numeric:
-            compilationlist += [["fast-downward-reachability-grounder", CompilationKind.GROUNDING]]
         compiler_names = [c[0] for c in compilationlist]
         compiler_kinds = [c[1] for c in compilationlist]
         with Compiler(names=compiler_names, compilation_kinds=compiler_kinds) as compiler:

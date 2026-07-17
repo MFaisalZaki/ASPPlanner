@@ -6,7 +6,7 @@ import clingo
 
 from unified_planning.engines import PlanGenerationResultStatus, ValidationResultStatus
 from unified_planning.plans import SequentialPlan, ActionInstance
-from unified_planning.shortcuts import PlanValidator
+from unified_planning.shortcuts import PlanValidator, CompilationKind
 
 from aspplanner.compilers.asp_encoder import ASPEncoder
 from aspplanner.compilers.asp_facts import asp_name, ASPStatement, parse_lp_file, dump_lp
@@ -27,13 +27,13 @@ class ASPPlanner:
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.
     """
 
-    def __init__(self, problem, encoder_type='seq'):
+    def __init__(self, problem, encoder_type='seq', compilationlist: Optional[List[List[str]]] = None):
         if encoder_type not in ENCODERS:
             raise ValueError(
                 f"Unsupported encoder type: {encoder_type!r}; available: {sorted(ENCODERS)}")
         encoder_cls, self.encoding_path = ENCODERS[encoder_type]
         self.problem       = problem
-        self.compiled_task = encoder_cls().compile(problem)
+        self.compiled_task = encoder_cls().compile(problem, self._check_compilationlist(problem, compilationlist))
         self.task          = self.compiled_task.problem
         # The task facts never change across horizons: build the string once.
         self.task_facts    = '\n'.join(sorted(self.compiled_task.fact_lines))
@@ -43,6 +43,32 @@ class ASPPlanner:
         self._objects_by_asp_name = {asp_name(o.name): o for o in self.task.all_objects}
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
+
+    def _check_compilationlist(self, problem, compilationlist: Optional[List[List[str]]]) -> List[List[str]]:
+        # Numeric tasks skip the grounding step entirely: the Fast Downward
+        # reachability grounder rejects them, and pre-grounding with UP's
+        # grounder only bloats the program — the lifted encoding already
+        # carries everything gringo needs to instantiate (action signature
+        # rules bind parameters via has(_, type(...)) and folded static
+        # preconditions prune the bindings). PDDL (:functions ...) parse as
+        # real-typed fluents; the fact builders accept them as long as every
+        # constant is integral (clingo terms are integers) and raise otherwise.
+        
+        if compilationlist is not None:
+            return compilationlist
+        
+        kind = problem.kind
+        numeric = kind.has_int_fluents() or kind.has_real_fluents()
+        retlsit = []
+        if compilationlist is None:
+            retlsit += [["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING]]
+            retlsit += [["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING]]
+            retlsit += [["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING]]
+
+        if not numeric:
+            retlsit += [["fast-downward-reachability-grounder", CompilationKind.GROUNDING]]
+        
+        return retlsit
 
     def validate(self, plan) -> Tuple[bool, Optional[str]]:
         """Validate a plan against the original problem with UP's sequential
