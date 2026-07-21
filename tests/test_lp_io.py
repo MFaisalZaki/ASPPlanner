@@ -15,7 +15,11 @@ from aspplanner.compilers.asp_facts import (
     parse_lp_file,
 )
 
-from test_planner import robot_line_problem
+from test_planner import (
+    numeric_counter_problem,
+    robot_line_problem,
+    rover_recharge_problem,
+)
 
 SEQ_ENCODING_PATH = ENCODERS["seq"][1]
 
@@ -74,6 +78,51 @@ def test_dump_accepts_fact_builders_and_strings(tmp_path):
     reparsed = parse_lp_file(out)
     assert all(isinstance(t, ASPFact) or isinstance(t, ASPRule) for t in reparsed)
     assert any("initialState" in str(t) for t in reparsed)
+
+
+def test_dump_reparses_numeric_fact_builders(tmp_path):
+    """A numeric task's fact builders (numVariable/numPrecondition/numEffect)
+    must render to valid clingo that dumps, reparses, and round-trips.
+
+    ``robot_line_problem`` has no numeric fluents, so this is the only place
+    the numeric ASPTerm rendering (ASPNumFluent, ASPNumComparison, numeric
+    ASPAction effects) is exercised through the .lp I/O path.
+    """
+    # finish needs `counter >= 3`; tick increments counter -> a `<=` numeric
+    # precondition and an increase numEffect on an int-valued fluent.
+    planner = ASPPlanner(numeric_counter_problem(threshold=3), "seq")
+    out = tmp_path / "numeric_facts.lp"
+    dump_lp(sorted(planner.compiled_task.fact_lines), out)
+
+    reparsed = parse_lp_file(out)
+    assert all(isinstance(t, (ASPFact, ASPRule)) for t in reparsed)
+    rendered = [str(t) for t in reparsed]
+
+    # the int-valued fluent is declared as a numVariable (fact)...
+    assert any(r.startswith("numVariable(") for r in rendered)
+    # ...the `counter >= 3` precondition renders as a `le` numComparison...
+    assert any("numPrecondition(" in r and ",le," in r for r in rendered)
+    # ...and the increase effect renders as a numEffect rule.
+    assert any(r.startswith("numEffect(") for r in rendered)
+
+    # reparse -> dump -> reparse is a fixpoint (numeric rendering is stable).
+    buffer = io.StringIO()
+    dump_lp(reparsed, buffer)
+    assert [str(t) for t in parse_lp(buffer.getvalue())] == rendered
+
+
+def test_numeric_goal_renders_as_numgoal_fact(tmp_path):
+    """A numeric comparison *goal* (`battery >= 2`) must compile to a numGoal
+    fact -- not a boolean goal/2 -- and survive dump + reparse."""
+    planner = ASPPlanner(rover_recharge_problem(target=2), "seq")
+    out = tmp_path / "numeric_goal.lp"
+    dump_lp(sorted(planner.compiled_task.fact_lines), out)
+
+    rendered = [str(t) for t in parse_lp_file(out)]
+    # the `battery >= 2` goal folds to `2 <= battery` -> a `le` numGoal fact...
+    assert any(r.startswith("numGoal(le,") for r in rendered)
+    # ...and it is NOT emitted as a boolean goal/2 atom.
+    assert not any(r.startswith("goal(") for r in rendered)
 
 
 def test_parse_keeps_script_blocks():

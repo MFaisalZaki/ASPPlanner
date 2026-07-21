@@ -87,6 +87,40 @@ def numeric_counter_problem(threshold=3):
     return problem
 
 
+def rover_recharge_problem(target=2, with_bool_goal=False):
+    """A rover whose `battery` (int fluent) starts at 0; `recharge` adds 1.
+
+    The goal is a NUMERIC formula ``battery(rover1) >= target`` rather than a
+    boolean fluent -- the case the seq encoding checks with numGoal against
+    numval at the goal step. Shortest plan is ``recharge`` x target.
+    When ``with_bool_goal``, also require a boolean ``deployed`` goal so the
+    conjunctive numeric+boolean goal path is exercised together.
+    """
+    from unified_planning.shortcuts import Fluent, GE
+
+    Rover = UserType("rover")
+    battery = Fluent("battery", IntType(), r=Rover)
+    recharge = InstantaneousAction("recharge", r=Rover)
+    r = recharge.parameter("r")
+    recharge.add_increase_effect(battery(r), 1)
+
+    problem = Problem("rover_recharge")
+    problem.add_fluent(battery, default_initial_value=0)
+    problem.add_action(recharge)
+    rover = Object("rover1", Rover)
+    problem.add_object(rover)
+    problem.add_goal(GE(battery(rover), target))
+
+    if with_bool_goal:
+        deployed = Fluent("deployed", BoolType(), r=Rover)
+        deploy = InstantaneousAction("deploy", r=Rover)
+        deploy.add_effect(deployed(deploy.parameter("r")), True)
+        problem.add_fluent(deployed, default_initial_value=False)
+        problem.add_action(deploy)
+        problem.add_goal(deployed(rover))
+    return problem
+
+
 def assert_plan_is_over_original_problem(problem, plan):
     """The lifted plan must be stated in terms of the task passed to the
     planner: every step references one of ITS action objects (identity, not
@@ -201,6 +235,70 @@ def test_numeric_counter():
     assert result.status == Status.SOLVED_SATISFICING
     names = [ai.action.name for ai in result.plan.actions]
     assert names.count("tick") == 3 and names[-1] == "finish"
+    assert_plan_is_over_original_problem(problem, result.plan)
+
+
+def test_numeric_goal_formula():
+    """A goal stated as `battery(rover1) >= 2` (numeric comparison, not a
+    boolean fluent) must plan and validate against the original problem."""
+    problem = rover_recharge_problem(target=2)
+    with OneshotPlanner(name="ASPPlanner") as planner:
+        result = planner.solve(problem)
+    assert result.status == Status.SOLVED_SATISFICING
+    names = [ai.action.name for ai in result.plan.actions]
+    assert names == ["recharge", "recharge"]
+    assert_plan_is_over_original_problem(problem, result.plan)
+
+
+def test_numeric_goal_greater_than_zero():
+    """The user's `recharge > 0` case: a single strict-inequality numeric goal
+    from a zero initial value needs exactly one increment."""
+    from unified_planning.shortcuts import Fluent, GT
+
+    battery = Fluent("battery", IntType())
+    recharge = InstantaneousAction("recharge")
+    recharge.add_increase_effect(battery(), 1)
+    problem = Problem("recharge_gt0")
+    problem.add_fluent(battery, default_initial_value=0)
+    problem.add_action(recharge)
+    problem.add_goal(GT(battery(), 0))
+
+    with OneshotPlanner(name="ASPPlanner") as planner:
+        result = planner.solve(problem)
+    assert result.status == Status.SOLVED_SATISFICING
+    assert [ai.action.name for ai in result.plan.actions] == ["recharge"]
+    assert_plan_is_over_original_problem(problem, result.plan)
+
+
+def test_numeric_goal_unreachable_is_unsolvable():
+    """A numeric goal that no reachable state satisfies stays unsolved within
+    the horizon -- the constraint must actually gate the goal, not be vacuous.
+    `battery` only ever increases, so `battery <= -1` is never satisfiable."""
+    from unified_planning.shortcuts import Fluent, LE
+
+    battery = Fluent("battery", IntType())
+    recharge = InstantaneousAction("recharge")
+    recharge.add_increase_effect(battery(), 1)
+    problem = Problem("recharge_unsat")
+    problem.add_fluent(battery, default_initial_value=0)
+    problem.add_action(recharge)
+    problem.add_goal(LE(battery(), -1))
+
+    with OneshotPlanner(name="ASPPlanner", params={"max_horizon": 4}) as planner:
+        result = planner.solve(problem)
+    assert result.status == Status.UNSOLVABLE_INCOMPLETELY
+    assert result.plan is None
+
+
+def test_conjunctive_numeric_and_boolean_goal():
+    """A goal mixing a numeric comparison and a boolean fluent must satisfy
+    both -- the AND split routes each conjunct to its own goal path."""
+    problem = rover_recharge_problem(target=2, with_bool_goal=True)
+    with OneshotPlanner(name="ASPPlanner") as planner:
+        result = planner.solve(problem)
+    assert result.status == Status.SOLVED_SATISFICING
+    names = [ai.action.name for ai in result.plan.actions]
+    assert names.count("recharge") == 2 and names.count("deploy") == 1
     assert_plan_is_over_original_problem(problem, result.plan)
 
 

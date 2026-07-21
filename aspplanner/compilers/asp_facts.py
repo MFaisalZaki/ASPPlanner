@@ -68,6 +68,19 @@ def parseexpr(f, t=None):
         raise TypeError(f"Unsupported thing: {f} of type {type(f)}")
     return []
 
+def is_numeric_comparison(f):
+    """Is this FNode a numeric comparison (or the negation of one)?
+
+    ``lt``/``le`` and numeric ``=`` are the linear comparisons the ASP
+    encoding evaluates against ``numval``; UP folds ``GE``/``GT`` and their
+    negations into these shapes. Used to route a *goal* onto the numeric
+    path instead of the boolean/object state-goal path."""
+    g = f.args[0] if f.is_not() else f
+    if g.is_lt() or g.is_le():
+        return True
+    return g.is_equals() and (_is_numeric_fnode(g.args[0]) or _is_numeric_fnode(g.args[1]))
+
+
 def _equality_value_term(arg):
     if arg.is_object_exp():
         return f'constant("{asp_name(arg.object().name)}")'
@@ -431,6 +444,25 @@ class ASPInitialState(ASPStateVarVal):
 class ASPGoalState(ASPStateVarVal):
     def __str__(self):
         return f"goal({super().__str__()})."
+
+
+class ASPNumGoal(ASPTerm):
+    """A numeric goal ``lhs OP rhs`` checked against numval at the goal step.
+
+    The goal-time analogue of ASPNumComparison/numPrecondition: it reuses that
+    class's ``op, expr(V,C), expr(V,C)`` rendering (via parseexpr, which folds
+    ``GE``/``GT`` and negations into ``lt``/``le``/``eq``) and wraps it as a
+    standalone ``numGoal(...)`` fact. The encoding rejects any model whose
+    numval at the queried timestep violates it.
+    """
+    def __init__(self, f):
+        self.cmp = parseexpr(f)
+        assert isinstance(self.cmp, ASPNumComparison), (
+            f"ASPNumGoal expects a numeric comparison, got {type(self.cmp)} for {f}"
+        )
+
+    def __str__(self):
+        return f"numGoal({str(self.cmp)})."
 
 
 # ---------------------------------------------------------------------------

@@ -29,7 +29,9 @@ from aspplanner.compilers.asp_facts import (
     ASPNumFluent,
     ASPAction,
     ASPInitialState,
-    ASPGoalState
+    ASPGoalState,
+    ASPNumGoal,
+    is_numeric_comparison,
 )
 
 
@@ -239,6 +241,12 @@ class ASPEncoder:
         goal_predicates = [goal_state] if goal_state.node_type != OperatorKind.AND else goal_state.args
         ret_goals = []
         for g in goal_predicates:
+            # Numeric comparison goals (e.g. `battery >= 1`) are checked against
+            # numval at the goal step, like numeric preconditions; everything
+            # else is a boolean/object state goal on a grounded fluent.
+            if is_numeric_comparison(g):
+                ret_goals.append(ASPNumGoal(g))
+                continue
             _is_true = g.node_type != OperatorKind.NOT
             value = str(_is_true).lower()
             ret_goals.append(ASPGoalState(g if _is_true else g.args[0], value))

@@ -18,6 +18,7 @@
 #defined occurs/2.
 #defined action/1.
 #defined goal/2.
+#defined numGoal/3.
 #defined precondition/3.
 #defined postcondition/4.
 #defined numVariable/1.
@@ -81,3 +82,9 @@ numval(V, X, t) :- holds(V, value(V, X), t), numVariable(V).
 #external query(t).
 
 :- query(t), goal(Variable, Value), not holds(Variable, Value, t).
+
+% Numeric goals: linear comparisons of value(V)+C sides at the goal step,
+% evaluated against numval(_, _, t) exactly as numeric preconditions are at t-1.
+:- query(t), numGoal(lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 >= X2 + C2.
+:- query(t), numGoal(le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 > X2 + C2.
+:- query(t), numGoal(eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 != X2 + C2.
