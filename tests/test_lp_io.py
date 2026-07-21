@@ -2,8 +2,8 @@
 
 import io
 
-from aspplanner.asp_planner import ASPPlanner, ENCODERS
-from aspplanner.compilers.asp_facts import (
+from aspplanners.plasp.planner import PLASPPlanner, ENCODERS
+from aspplanners.lp_io import (
     ASPConstraint,
     ASPDirective,
     ASPFact,
@@ -61,7 +61,7 @@ def test_parse_dump_parse_is_a_fixpoint():
 def test_dumped_encoding_still_solves(tmp_path):
     """parse -> dump must preserve the encoding's semantics end to end."""
     problem = robot_line_problem()
-    planner = ASPPlanner(problem, "seq")
+    planner = PLASPPlanner(problem, "seq")
 
     dumped = tmp_path / "roundtripped.lp"
     dump_lp(parse_lp_file(SEQ_ENCODING_PATH), dumped)
@@ -72,7 +72,7 @@ def test_dumped_encoding_still_solves(tmp_path):
 
 
 def test_dump_accepts_fact_builders_and_strings(tmp_path):
-    planner = ASPPlanner(robot_line_problem(), "seq")
+    planner = PLASPPlanner(robot_line_problem(), "seq")
     out = tmp_path / "facts.lp"
     dump_lp(sorted(planner.compiled_task.fact_lines), out)
     reparsed = parse_lp_file(out)
@@ -90,7 +90,7 @@ def test_dump_reparses_numeric_fact_builders(tmp_path):
     """
     # finish needs `counter >= 3`; tick increments counter -> a `<=` numeric
     # precondition and an increase numEffect on an int-valued fluent.
-    planner = ASPPlanner(numeric_counter_problem(threshold=3), "seq")
+    planner = PLASPPlanner(numeric_counter_problem(threshold=3), "seq")
     out = tmp_path / "numeric_facts.lp"
     dump_lp(sorted(planner.compiled_task.fact_lines), out)
 
@@ -114,7 +114,7 @@ def test_dump_reparses_numeric_fact_builders(tmp_path):
 def test_numeric_goal_renders_as_numgoal_fact(tmp_path):
     """A numeric comparison *goal* (`battery >= 2`) must compile to a numGoal
     fact -- not a boolean goal/2 -- and survive dump + reparse."""
-    planner = ASPPlanner(rover_recharge_problem(target=2), "seq")
+    planner = PLASPPlanner(rover_recharge_problem(target=2), "seq")
     out = tmp_path / "numeric_goal.lp"
     dump_lp(sorted(planner.compiled_task.fact_lines), out)
 
@@ -139,14 +139,14 @@ p(1).
 
 
 def test_planner_encoding_terms():
-    planner = ASPPlanner(robot_line_problem(), "seq")
+    planner = PLASPPlanner(robot_line_problem(), "seq")
     terms = planner.encoding_terms()
     assert all(isinstance(t, ASPStatement) for t in terms)
     assert any(isinstance(t, ASPConstraint) for t in terms)  # the goal check
 
 
 def test_dump_lp_program(tmp_path):
-    planner = ASPPlanner(robot_line_problem(), "seq")
+    planner = PLASPPlanner(robot_line_problem(), "seq")
     out = tmp_path / "program.lp"
     planner.dump_lp_program(out)
     text = out.read_text()

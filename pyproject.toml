@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aspplanner"
+name = "aspplanners"
 version = "0.1.0"
 description = "Lightweight planner using Answer Set Programming (ASP)"
 readme = "README.md"
@@ -18,7 +18,7 @@ keywords = [
     "answer-set-programming",
     "asp", 
     "planning",
-    "aspplanner",
+    "aspplanners",
     "clingo",
     "artificial-intelligence"
 ]
@@ -44,13 +44,20 @@ dependencies = [
 
 [project.optional-dependencies]
 
+# The ABAPlan backend (aspplanners.abaplan) solves via aspforaba; it is optional
+# so the default PLASP planner installs without the Bitbucket git dependency.
+aba = [
+    "aspforaba @ git+https://bitbucket.org/coreo-group/aspforaba.git"
+]
+
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "isort>=5.12.0",
     "flake8>=6.0.0",
-    "mypy>=1.5.0"
+    "mypy>=1.5.0",
+    "aspforaba @ git+https://bitbucket.org/coreo-group/aspforaba.git"
 ]
 docs = [
     "sphinx>=7.0.0",
@@ -66,11 +73,11 @@ Issues = "https://github.com/MFaisalZaki/ASPPlanner/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["aspplanner*"]
+include = ["aspplanners*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-"aspplanner" = [
+"aspplanners.plasp" = [
     "encodings/*.lp",
 ]
 
@@ -124,7 +131,7 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 
 [tool.coverage.run]
-source = ["aspplanner"]
+source = ["aspplanners"]
 omit = [
     "*/tests/*",
     "*/test_*",
