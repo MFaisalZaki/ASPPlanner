@@ -3,7 +3,7 @@
 This layer knows nothing about planning or the PLASP fact vocabulary: it is the
 ``ASPTerm`` identity base plus a thin classification/round-trip wrapper over
 clingo's AST (`parse_lp`/`dump_lp`). Any encoding that reads or writes ``.lp``
-text can build on it; the PLASP fact builders in ``aspplanner.plasp.facts`` are
+text can build on it; the PLASP fact builders in ``aspplanners.plasp.facts`` are
 one such consumer.
 """
 

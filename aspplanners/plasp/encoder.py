@@ -17,10 +17,10 @@ from functools import partial
 
 from unified_planning.plans import ActionInstance
 
-from aspplanner.common.tim_typer import TIMTypeInferenceCompiler
-from aspplanner.common.compilation import compose_map_backs, run_compilers
+from aspplanners.common.tim_typer import TIMTypeInferenceCompiler
+from aspplanners.common.compilation import compose_map_backs, run_compilers
 
-from aspplanner.plasp.facts import (
+from aspplanners.plasp.facts import (
     asp_name,
     ASPType,
     ASPBooleanType,
@@ -102,7 +102,7 @@ def _render_facts(asp_objects, wrap: Optional[str] = None) -> Set[str]:
 class PLASPEncoder:
     """
     This is a recreation of the PLASP tool: compiles a UP Problem into the
-    ASP facts consumed by the encodings in `aspplanner/plasp/encodings/`.
+    ASP facts consumed by the encodings in `aspplanners/plasp/encodings/`.
     """
 
     name = "plaspencoder"

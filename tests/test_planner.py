@@ -5,7 +5,7 @@ objects (not the internal grounded/renamed vocabulary) and validate with
 UP's sequential plan validator against the original problem.
 """
 
-import aspplanner  # noqa: F401 -- registers the engine
+import aspplanners  # noqa: F401 -- registers the engine
 from unified_planning.engines import PlanGenerationResultStatus as Status
 from unified_planning.shortcuts import (
     BoolType,
@@ -19,7 +19,7 @@ from unified_planning.shortcuts import (
     UserType,
 )
 
-from aspplanner.plasp.planner import ASPPlanner
+from aspplanners.plasp.planner import PLASPPlanner
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +345,7 @@ def test_colliding_names_are_rejected():
     problem.add_object(Object("loc_0", problem.user_types[0]))  # collides with loc-0
     import pytest
     with pytest.raises(ValueError, match="collide"):
-        ASPPlanner(problem, "seq")
+        PLASPPlanner(problem, "seq")
 
 
 def test_timeout_reports_timeout():
@@ -361,23 +361,23 @@ def test_timeout_reports_timeout():
 
 def test_fixed_horizon_returns_empty_plan_when_unsat():
     problem = robot_line_problem()  # needs 3 steps
-    blocked = ASPPlanner(problem, "seq").plan(horizon=1)
+    blocked = PLASPPlanner(problem, "seq").plan(horizon=1)
     assert not blocked.actions
 
-    solved = ASPPlanner(problem, "seq").plan(horizon=3)
+    solved = PLASPPlanner(problem, "seq").plan(horizon=3)
     assert len(solved.actions) == 3
 
 
 def test_max_horizon_search_finds_shortest_plan():
     problem = robot_line_problem()
-    planner = ASPPlanner(problem, "seq")
+    planner = PLASPPlanner(problem, "seq")
     plan = planner.plan(max_horizon=6)
     assert len(plan.actions) == 3
     assert isinstance(planner.logs, list)
 
 
 def test_lp_program_is_dumpable():
-    planner = ASPPlanner(robot_line_problem(), "seq")
+    planner = PLASPPlanner(robot_line_problem(), "seq")
     program = planner.lp_program()
     assert "occurs" in program        # encoding rules present
     assert "initialState(" in program  # task facts present

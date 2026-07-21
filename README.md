@@ -24,16 +24,16 @@ pip install -e .
 
 Runtime dependencies (installed automatically): `clingo>=5.6.0`, `unified-planning>=1.1.0`, `up_fast_downward>=0.5.2`.
 
-The `ABAPlanner` backend additionally needs `aspforaba`; install it with the optional `aba` extra (`pip install -e ".[aba]"`). It is imported lazily, so `import aspplanner` and the default `ASPPlanner` engine work without it.
+The `ABAPlanner` backend additionally needs `aspforaba`; install it with the optional `aba` extra (`pip install -e ".[aba]"`). It is imported lazily, so `import aspplanners` and the default `ASPPlanner` engine work without it.
 
 ## Usage
 
 ### Through the Unified Planning framework
 
-Importing `aspplanner` registers the engine, so the standard UP entry points work out of the box:
+Importing `aspplanners` registers the engine, so the standard UP entry points work out of the box:
 
 ```python
-import aspplanner  # registers the ASPPlanner engine
+import aspplanners  # registers the ASPPlanner engine
 from unified_planning.shortcuts import OneshotPlanner
 
 # `problem` is any unified_planning.model.Problem you constructed or parsed.
@@ -50,9 +50,9 @@ Engine options: `params={"max_horizon": 50}` bounds the deepening search, and `p
 You can also drive the planner directly if you don't need the UP result wrapper:
 
 ```python
-from aspplanner.plasp.planner import ASPPlanner
+from aspplanners.plasp.planner import PLASPPlanner
 
-planner = ASPPlanner(problem, encoder_type="seq")
+planner = PLASPPlanner(problem, encoder_type="seq")
 plan = planner.plan(max_horizon=100, timeout=60)   # or plan(horizon=10)
 print(planner.status)   # PlanGenerationResultStatus of the last call
 print(planner.logs)     # human-readable notes
@@ -62,13 +62,13 @@ print(planner.logs)     # human-readable notes
 
 #### Customizing the compilation pipeline
 
-Before a problem reaches the ASP encoder it is put through a list of UP compilers. By default `ASPPlanner` derives this list from the problem: the quantifier, negative-condition and disjunctive-condition removers always run, and classical (non-numeric) tasks additionally get Fast Downward's reachability grounder — numeric tasks skip grounding and solve on the lifted encoding.
+Before a problem reaches the ASP encoder it is put through a list of UP compilers. By default `PLASPPlanner` derives this list from the problem: the quantifier, negative-condition and disjunctive-condition removers always run, and classical (non-numeric) tasks additionally get Fast Downward's reachability grounder — numeric tasks skip grounding and solve on the lifted encoding.
 
 Pass `compilationlist` to take over that choice. Each entry is a `[engine_name, CompilationKind]` pair applied in order, and the list is used verbatim — the automatic numeric-vs-classical grounder selection is bypassed, so include or omit the grounder yourself:
 
 ```python
 from unified_planning.shortcuts import CompilationKind
-from aspplanner.plasp.planner import ASPPlanner
+from aspplanners.plasp.planner import PLASPPlanner
 
 # Solve on the lifted encoding: run the removers but skip the grounder.
 pipeline = [
@@ -76,7 +76,7 @@ pipeline = [
     ["up_negative_conditions_remover",    CompilationKind.NEGATIVE_CONDITIONS_REMOVING],
     ["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING],
 ]
-planner = ASPPlanner(problem, encoder_type="seq", compilationlist=pipeline)
+planner = PLASPPlanner(problem, encoder_type="seq", compilationlist=pipeline)
 plan = planner.plan()
 ```
 
@@ -92,7 +92,7 @@ terms = planner.encoding_terms()     # encoding parsed into ASPTerm statements
 `encoding_terms()` returns typed statements (`ASPFact`, `ASPRule`, `ASPConstraint`, `ASPWeakConstraint`, `ASPDirective`) wrapping clingo AST nodes — filter or rewrite them programmatically, then write them back out:
 
 ```python
-from aspplanner.lp_io import parse_lp_file, dump_lp
+from aspplanners.lp_io import parse_lp_file, dump_lp
 
 terms = parse_lp_file("my-encoding.lp")
 rules = [t for t in terms if isinstance(t, ASPRule)]
@@ -103,11 +103,11 @@ The encoding is split into `#program base / step(t) / check(t)` parts; ground `b
 
 ## Project layout
 
-- [aspplanner/plasp/](aspplanner/plasp/) — the default PLASP backend: `planner.py` (core solver loop: compile → incremental ground/solve → extract → map back → validate), `encoder.py` (UP → ASP facts), `facts.py` (fact builders), and `encodings/` (clingo encodings per encoder type).
-- [aspplanner/abaplan/](aspplanner/abaplan/) — the optional ABA backend: `planner.py` (STRIPS-to-ABA reduction + aspforaba search) and `up_engine.py` (its UP adapter, registered as `ABAPlanner`).
-- [aspplanner/common/](aspplanner/common/) — backend-agnostic front-end shared by both backends: compilation pipeline, plan validation, TIM typing.
-- [aspplanner/lp_io.py](aspplanner/lp_io.py) — generic ASP program I/O (`parse_lp`/`dump_lp` and the `ASPStatement` term family).
-- [aspplanner/up_asp_planner.py](aspplanner/up_asp_planner.py) — UP engine adapter and supported `ProblemKind`.
+- [aspplanners/plasp/](aspplanners/plasp/) — the default PLASP backend: `planner.py` (`PLASPPlanner` — core solver loop: compile → incremental ground/solve → extract → map back → validate), `encoder.py` (UP → ASP facts), `facts.py` (fact builders), and `encodings/` (clingo encodings per encoder type).
+- [aspplanners/abaplan/](aspplanners/abaplan/) — the optional ABA backend: `encoder.py` (`ABAEncoder` — STRIPS-to-ABA framework construction) and `planner.py` (`ABAPlan` — deepening search over aspforaba).
+- [aspplanners/common/](aspplanners/common/) — backend-agnostic front-end shared by both backends: compilation pipeline, plan validation, TIM typing.
+- [aspplanners/lp_io.py](aspplanners/lp_io.py) — generic ASP program I/O (`parse_lp`/`dump_lp` and the `ASPStatement` term family).
+- [aspplanners/up_engines.py](aspplanners/up_engines.py) — both UP engine adapters (`ASPPlanner`, `ABAPlanner`) and their supported `ProblemKind`s.
 - [tests/](tests/) — end-to-end tests (`pip install -e ".[dev]" && pytest`).
 
 ## License

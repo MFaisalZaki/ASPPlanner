@@ -9,22 +9,26 @@ import pytest
 
 pytest.importorskip("aspforaba", reason="ABA backend requires the optional `aba` extra")
 
-import aspplanner  # noqa: F401,E402 -- registers the ABAPlanner engine
+import aspplanners  # noqa: F401,E402 -- registers the ABAPlanner engine
 from unified_planning.engines import PlanGenerationResultStatus as Status  # noqa: E402
 from unified_planning.shortcuts import (  # noqa: E402
     BoolType,
     Fluent,
+    GE,
     InstantaneousAction,
+    IntType,
     Not,
     OneshotPlanner,
+    Problem,
 )
 
-from aspplanner.abaplan.planner import ABAPlan  # noqa: E402
+from aspplanners.abaplan.planner import ABAPlan  # noqa: E402
 
 from test_planner import (  # noqa: E402
     assert_plan_is_over_original_problem,
     numeric_counter_problem,
     robot_line_problem,
+    rover_recharge_problem,
 )
 
 
@@ -93,15 +97,73 @@ def test_unsolvable_within_horizon_returns_empty_plan():
     assert plan.actions == []
 
 
-def test_numeric_task_is_unsupported():
-    """ABAPlan is STRIPS only; a numeric task fails to compile (the reachability
-    grounder rejects it) rather than silently producing a bogus encoding."""
-    with pytest.raises(Exception):
-        ABAPlan(numeric_counter_problem(threshold=2))
+# ---------------------------------------------------------------------------
+# Numeric planning (finite-domain propositionalisation)
+# ---------------------------------------------------------------------------
+
+def test_numeric_counter():
+    """`tick` increments a counter; `finish` needs counter >= 3 -- a numeric
+    increase effect plus a numeric comparison precondition."""
+    problem = numeric_counter_problem(threshold=3)
+    plan = ABAPlan(problem).plan(max_horizon=8)
+    names = [ai.action.name for ai in plan.actions]
+    assert names.count("tick") == 3 and names[-1] == "finish"
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_numeric_goal_formula():
+    """A goal stated as `battery(rover1) >= 2` (numeric comparison)."""
+    problem = rover_recharge_problem(target=2)
+    plan = ABAPlan(problem).plan(max_horizon=6)
+    assert [ai.action.name for ai in plan.actions] == ["recharge", "recharge"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_fluent_plus_fluent_comparison_is_rejected():
+    """Coupling several fluents in a comparison (`x + y >= 3`) would enumerate
+    the product of their domains, which propositionalises too expensively, so
+    the ABA encoding rejects it (single-fluent numeric only)."""
+    x, y = Fluent("x", IntType()), Fluent("y", IntType())
+    incx = InstantaneousAction("incx"); incx.add_increase_effect(x(), 1)
+    incy = InstantaneousAction("incy"); incy.add_increase_effect(y(), 1)
+    problem = Problem("ff_goal")
+    problem.add_fluent(x, default_initial_value=0)
+    problem.add_fluent(y, default_initial_value=0)
+    problem.add_action(incx)
+    problem.add_action(incy)
+    problem.add_goal(GE(x() + y(), 3))
+
+    with pytest.raises(NotImplementedError, match="single-fluent"):
+        ABAPlan(problem)
+
+
+def test_fluent_delta_effect_is_rejected():
+    """An effect whose change is a fluent (`increase(y, x)`) couples two fluents
+    and is likewise rejected by the ABA encoding."""
+    x, y = Fluent("x", IntType()), Fluent("y", IntType())
+    dump = InstantaneousAction("dump")
+    dump.add_increase_effect(y(), x())  # delta is another fluent's value
+    problem = Problem("ff_effect")
+    problem.add_fluent(x, default_initial_value=2)
+    problem.add_fluent(y, default_initial_value=0)
+    problem.add_action(dump)
+    problem.add_goal(GE(y(), 2))
+
+    with pytest.raises(NotImplementedError, match="single-fluent"):
+        ABAPlan(problem)
+
+
+def test_up_engine_solves_numeric():
+    problem = numeric_counter_problem(threshold=2)
+    with OneshotPlanner(name="ABAPlanner", params={"max_horizon": 6}) as planner:
+        result = planner.solve(problem)
+    assert result.status == Status.SOLVED_SATISFICING
+    names = [ai.action.name for ai in result.plan.actions]
+    assert names.count("tick") == 2 and names[-1] == "finish"
 
 
 def test_status_reflects_outcome():
-    """plan() records the outcome in `status`/`logs` (like ASPPlanner)."""
+    """plan() records the outcome in `status`/`logs` (like PLASPPlanner)."""
     solved = ABAPlan(robot_line_problem(n_locations=4))
     solved.plan(max_horizon=6)
     assert solved.status == Status.SOLVED_SATISFICING

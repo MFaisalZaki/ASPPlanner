@@ -1,15 +1,15 @@
 """PLASP fact builders: render a compiled UP problem into the ASP fact
 vocabulary (``variable``/``action``/``precondition``/``numGoal``/...) consumed
-by the encodings in ``aspplanner/plasp/encodings``.
+by the encodings in ``aspplanners/plasp/encodings``.
 
 This is a recreation of the PLASP tool's translation. Every builder is an
-:class:`~aspplanner.lp_io.ASPTerm`, so its identity is its rendered ASP text
+:class:`~aspplanners.lp_io.ASPTerm`, so its identity is its rendered ASP text
 and sets of facts deduplicate accordingly.
 """
 
 from unified_planning.shortcuts import FNode, EffectKind
 
-from aspplanner.lp_io import ASPTerm
+from aspplanners.lp_io import ASPTerm
 
 
 def asp_name(name):
@@ -124,7 +124,9 @@ def _num_side(f):
     Supports the linear shapes that survive UP's compilation of PDDL numeric
     conditions: an int constant, a numeric fluent, and sums/differences of
     one fluent with constants (e.g. ``(+ (economy ?t) 1)``). Anything richer
-    (two fluents on one side, multiplication) raises.
+    (two fluents on one side, multiplication) raises -- the PLASP encoding
+    keeps one variable per side for readability; use the ABA backend for
+    arithmetic that couples several fluents.
     """
     if f.is_int_constant() or f.is_real_constant():
         return None, _int_value(f)
@@ -251,12 +253,14 @@ class ASPEquality(ASPTerm):
 
 
 class ASPNumComparison(ASPTerm):
-    """Arithmetic precondition ``lhs OP rhs`` with each side value(V)+C.
+    """Arithmetic comparison ``lhs OP rhs`` with each side value(V)+C.
 
-    Rendered as ``numPrecondition(Action, op, expr(V1,C1), expr(V2,C2))``
-    facts; the encoding evaluates the sides against ``numval/3`` at T-1.
-    A constant-only side uses the pseudo-variable ``none`` (numval fixes it
-    to 0, so the constant carries the value).
+    Rendered as ``op, expr(V1,C1), expr(V2,C2)`` (wrapped by the caller into a
+    ``numPrecondition``/``numGoal`` fact); the encoding evaluates the sides
+    against ``numval/3``. A constant-only side uses the pseudo-variable
+    ``none`` (numval fixes it to 0, so the constant carries the value).
+    Each side is a single fluent plus a constant -- expressions coupling two
+    fluents (e.g. ``f + g``) raise; use the ABA backend for those.
     """
     def __init__(self, f, op):
         self.up_expr = f

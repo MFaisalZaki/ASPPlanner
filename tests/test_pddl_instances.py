@@ -11,12 +11,12 @@ import os
 
 import pytest
 
-import aspplanner  # noqa: F401 -- registers the engine
+import aspplanners  # noqa: F401 -- registers the engine
 from unified_planning.engines import PlanGenerationResultStatus as Status
 from unified_planning.io import PDDLReader
 from unified_planning.shortcuts import OneshotPlanner
 
-from aspplanner.plasp.planner import ASPPlanner
+from aspplanners.plasp.planner import PLASPPlanner
 from test_planner import assert_plan_is_over_original_problem
 
 PDDL_DIR = os.path.join(os.path.dirname(__file__), "pddl")
@@ -58,9 +58,9 @@ def test_pddl_instance_solves_and_lifts_correctly(case_id, domain, problem_file,
 
 
 def test_direct_api_lifts_to_the_passed_task():
-    """Same contract through ASPPlanner directly (no UP engine wrapper)."""
+    """Same contract through PLASPPlanner directly (no UP engine wrapper)."""
     task = parse_case("blocksworld", "problem.pddl")
-    planner = ASPPlanner(task, "seq")
+    planner = PLASPPlanner(task, "seq")
     plan = planner.plan(max_horizon=8)
     assert len(plan.actions) == 4
     assert_plan_is_over_original_problem(task, plan)
