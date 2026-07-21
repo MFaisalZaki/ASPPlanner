@@ -16,7 +16,7 @@ from unified_planning.engines import PlanGenerationResultStatus as Status
 from unified_planning.io import PDDLReader
 from unified_planning.shortcuts import OneshotPlanner
 
-from aspplanner.asp_planner import ASPPlanner
+from aspplanner.plasp.planner import ASPPlanner
 from test_planner import assert_plan_is_over_original_problem
 
 PDDL_DIR = os.path.join(os.path.dirname(__file__), "pddl")

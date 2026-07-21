@@ -44,13 +44,20 @@ dependencies = [
 
 [project.optional-dependencies]
 
+# The ABAPlan backend (aspplanner.abaplan) solves via aspforaba; it is optional
+# so the default PLASP planner installs without the Bitbucket git dependency.
+aba = [
+    "aspforaba @ git+https://bitbucket.org/coreo-group/aspforaba.git"
+]
+
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "black>=23.0.0",
     "isort>=5.12.0",
     "flake8>=6.0.0",
-    "mypy>=1.5.0"
+    "mypy>=1.5.0",
+    "aspforaba @ git+https://bitbucket.org/coreo-group/aspforaba.git"
 ]
 docs = [
     "sphinx>=7.0.0",
@@ -70,7 +77,7 @@ include = ["aspplanner*"]
 exclude = ["tests*"]
 
 [tool.setuptools.package-data]
-"aspplanner" = [
+"aspplanner.plasp" = [
     "encodings/*.lp",
 ]
 

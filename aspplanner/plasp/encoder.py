@@ -1,11 +1,11 @@
-"""This module defines the ASP encoder class."""
+"""The PLASP encoder: compiles a UP Problem into ASP facts."""
 
 from dataclasses import dataclass
 from itertools import chain
 
 from unified_planning.engines.compilers.utils import replace_action
 from unified_planning.shortcuts import OperatorKind
-from unified_planning.shortcuts import EffectKind, Compiler, CompilationKind
+from unified_planning.shortcuts import EffectKind
 
 from unified_planning.model import (
     Problem,
@@ -17,9 +17,10 @@ from functools import partial
 
 from unified_planning.plans import ActionInstance
 
-from aspplanner.compilers.tim_typer import TIMTypeInferenceCompiler
+from aspplanner.common.tim_typer import TIMTypeInferenceCompiler
+from aspplanner.common.compilation import compose_map_backs, run_compilers
 
-from aspplanner.compilers.asp_facts import (
+from aspplanner.plasp.facts import (
     asp_name,
     ASPType,
     ASPBooleanType,
@@ -54,21 +55,6 @@ def _check_asp_name_collisions(problem: Problem) -> None:
                     f"ASP renaming '-'->'_' makes {what} names collide: "
                     f"{seen[rendered]!r} and {name!r}")
             seen[rendered] = name
-
-def _compose_map_backs(map_backs):
-    """Chain the per-stage plan map-backs of the compilation pipeline.
-
-    The extracted plan is stated on the LAST stage's problem, so the maps
-    apply in reverse pipeline order; each lifts the action instance one
-    stage closer to the user's original problem."""
-    def _map_back(action_instance):
-        for map_back in reversed(map_backs):
-            action_instance = map_back(action_instance)
-            if action_instance is None:
-                return None
-        return action_instance
-    return _map_back
-
 
 @dataclass
 class ASPEncodingResult:
@@ -113,13 +99,13 @@ def _render_facts(asp_objects, wrap: Optional[str] = None) -> Set[str]:
     return lines
 
 
-class ASPEncoder:
+class PLASPEncoder:
     """
     This is a recreation of the PLASP tool: compiles a UP Problem into the
-    ASP facts consumed by the encodings in `aspplanner/encodings/`.
+    ASP facts consumed by the encodings in `aspplanner/plasp/encodings/`.
     """
 
-    name = "aspencoder"
+    name = "plaspencoder"
 
     def compile(self, problem: Problem, compilationlist: List[List[str]]) -> ASPEncodingResult:
         assert isinstance(problem, Problem)
@@ -141,13 +127,8 @@ class ASPEncoder:
             delete_then_set_map[clean_action] = a
         map_backs.append(partial(replace_action, map=delete_then_set_map))
 
-        compiler_names = [c[0] for c in compilationlist]
-        compiler_kinds = [c[1] for c in compilationlist]
-        with Compiler(names=compiler_names, compilation_kinds=compiler_kinds) as compiler:
-            grounded_result = compiler.compile(new_problem)
-        map_backs.append(grounded_result.map_back_action_instance)
-
-        new_problem = grounded_result.problem
+        new_problem, grounded_map_back = run_compilers(new_problem, compilationlist)
+        map_backs.append(grounded_map_back)
 
         # step two check if we can infer types for untyped problems.
         if len(new_problem.user_types) == 1:
@@ -196,7 +177,7 @@ class ASPEncoder:
         return ASPEncodingResult(
             problem=new_problem,
             facts=facts,
-            map_back_action_instance=_compose_map_backs(map_backs),
+            map_back_action_instance=compose_map_backs(map_backs),
         )
     
     def _remove_delete_then_set(self, dirty_action: Action) -> Action:

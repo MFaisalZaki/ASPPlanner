@@ -10,6 +10,7 @@ A lightweight planner that solves automated planning problems by compiling them 
 - **Numeric planning**: integer-valued fluents with constant-delta `increase`/`decrease`/`assign` effects and linear comparison preconditions (simple numeric planning). Numeric tasks solve on the lifted encoding; classical tasks are pre-grounded with Fast Downward's reachability grounder.
 - **Configurable compilation pipeline**: the UP compilers that run before ASP encoding are selected automatically per problem, or supplied explicitly via the `compilationlist` argument when you want full control over the preprocessing.
 - **Built-in validation**: every returned plan is checked against the *original* problem with UP's `sequential_plan_validator` before being handed back.
+- **Two backends**: the default `ASPPlanner` (PLASP-style ASP encoding, solved with clingo) and an optional `ABAPlanner` (STRIPS-to-ABA reduction, solved with [aspforaba](https://bitbucket.org/coreo-group/aspforaba)). Both share the UP front-end (compilation pipeline, map-back, validation) and register as UP engines on import.
 
 ## Installation
 
@@ -22,6 +23,8 @@ pip install -e .
 ```
 
 Runtime dependencies (installed automatically): `clingo>=5.6.0`, `unified-planning>=1.1.0`, `up_fast_downward>=0.5.2`.
+
+The `ABAPlanner` backend additionally needs `aspforaba`; install it with the optional `aba` extra (`pip install -e ".[aba]"`). It is imported lazily, so `import aspplanner` and the default `ASPPlanner` engine work without it.
 
 ## Usage
 
@@ -47,7 +50,7 @@ Engine options: `params={"max_horizon": 50}` bounds the deepening search, and `p
 You can also drive the planner directly if you don't need the UP result wrapper:
 
 ```python
-from aspplanner.asp_planner import ASPPlanner
+from aspplanner.plasp.planner import ASPPlanner
 
 planner = ASPPlanner(problem, encoder_type="seq")
 plan = planner.plan(max_horizon=100, timeout=60)   # or plan(horizon=10)
@@ -65,7 +68,7 @@ Pass `compilationlist` to take over that choice. Each entry is a `[engine_name, 
 
 ```python
 from unified_planning.shortcuts import CompilationKind
-from aspplanner.asp_planner import ASPPlanner
+from aspplanner.plasp.planner import ASPPlanner
 
 # Solve on the lifted encoding: run the removers but skip the grounder.
 pipeline = [
@@ -89,7 +92,7 @@ terms = planner.encoding_terms()     # encoding parsed into ASPTerm statements
 `encoding_terms()` returns typed statements (`ASPFact`, `ASPRule`, `ASPConstraint`, `ASPWeakConstraint`, `ASPDirective`) wrapping clingo AST nodes — filter or rewrite them programmatically, then write them back out:
 
 ```python
-from aspplanner.compilers.asp_facts import parse_lp_file, dump_lp
+from aspplanner.lp_io import parse_lp_file, dump_lp
 
 terms = parse_lp_file("my-encoding.lp")
 rules = [t for t in terms if isinstance(t, ASPRule)]
@@ -100,10 +103,11 @@ The encoding is split into `#program base / step(t) / check(t)` parts; ground `b
 
 ## Project layout
 
-- [aspplanner/asp_planner.py](aspplanner/asp_planner.py) — core solver loop (compile → incremental ground/solve → extract → map back → validate).
+- [aspplanner/plasp/](aspplanner/plasp/) — the default PLASP backend: `planner.py` (core solver loop: compile → incremental ground/solve → extract → map back → validate), `encoder.py` (UP → ASP facts), `facts.py` (fact builders), and `encodings/` (clingo encodings per encoder type).
+- [aspplanner/abaplan/](aspplanner/abaplan/) — the optional ABA backend: `planner.py` (STRIPS-to-ABA reduction + aspforaba search) and `up_engine.py` (its UP adapter, registered as `ABAPlanner`).
+- [aspplanner/common/](aspplanner/common/) — backend-agnostic front-end shared by both backends: compilation pipeline, plan validation, TIM typing.
+- [aspplanner/lp_io.py](aspplanner/lp_io.py) — generic ASP program I/O (`parse_lp`/`dump_lp` and the `ASPStatement` term family).
 - [aspplanner/up_asp_planner.py](aspplanner/up_asp_planner.py) — UP engine adapter and supported `ProblemKind`.
-- [aspplanner/compilers/](aspplanner/compilers/) — UP-to-ASP compilation pipeline (encoder, fact builders, TIM typing).
-- [aspplanner/encodings/](aspplanner/encodings/) — clingo encodings used by each encoder type.
 - [tests/](tests/) — end-to-end tests (`pip install -e ".[dev]" && pytest`).
 
 ## License

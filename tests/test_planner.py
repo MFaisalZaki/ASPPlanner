@@ -19,7 +19,7 @@ from unified_planning.shortcuts import (
     UserType,
 )
 
-from aspplanner.asp_planner import ASPPlanner
+from aspplanner.plasp.planner import ASPPlanner
 
 
 # ---------------------------------------------------------------------------

@@ -4,18 +4,20 @@ from typing import List, Optional, Tuple
 
 import clingo
 
-from unified_planning.engines import PlanGenerationResultStatus, ValidationResultStatus
+from unified_planning.engines import PlanGenerationResultStatus
 from unified_planning.plans import SequentialPlan, ActionInstance
-from unified_planning.shortcuts import PlanValidator, CompilationKind
+from unified_planning.shortcuts import CompilationKind
 
-from aspplanner.compilers.asp_encoder import ASPEncoder
-from aspplanner.compilers.asp_facts import asp_name, ASPStatement, parse_lp_file, dump_lp
+from aspplanner.plasp.encoder import PLASPEncoder
+from aspplanner.plasp.facts import asp_name
+from aspplanner.lp_io import ASPStatement, parse_lp_file, dump_lp
+from aspplanner.common.validation import validate_plan
 
 _ENCODINGS_DIR = os.path.join(os.path.dirname(__file__), 'encodings')
 
 # encoder type -> (encoder class, clingo encoding file)
 ENCODERS = {
-    'seq': (ASPEncoder, os.path.join(_ENCODINGS_DIR, 'sequential-horizon.lp')),
+    'seq': (PLASPEncoder, os.path.join(_ENCODINGS_DIR, 'sequential-horizon.lp')),
 }
 
 
@@ -74,11 +76,7 @@ class ASPPlanner:
         """Validate a plan against the original problem with UP's sequential
         plan validator. Returns (is_valid, reason); reason is None/empty when
         the plan is valid."""
-        if plan is None:
-            return False, "No plan provided."
-        with PlanValidator(name='sequential_plan_validator') as validator:
-            result = validator.validate(self.problem, plan)
-        return result.status == ValidationResultStatus.VALID, result.reason
+        return validate_plan(self.problem, plan)
 
     def lp_program(self) -> str:
         """The complete logic program: the compiled task's facts followed by
@@ -97,7 +95,7 @@ class ASPPlanner:
     def encoding_terms(self) -> List[ASPStatement]:
         """The loaded encoding parsed into ASPTerm statements (facts, rules,
         constraints, directives) for programmatic inspection or rewriting;
-        write a modified list back with `aspplanner.compilers.asp_facts.dump_lp`.
+        write a modified list back with `aspplanner.lp_io.dump_lp`.
         Unlike `lp_program()`, the rendering is clingo-normalized (comments
         dropped, whitespace normalized)."""
         return parse_lp_file(self.encoding_path)

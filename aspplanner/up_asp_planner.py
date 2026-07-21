@@ -3,7 +3,7 @@ import unified_planning as up
 from unified_planning.engines import PlanGenerationResultStatus, PlanGenerationResult
 from unified_planning.engines.results import LogMessage, LogLevel
 
-from aspplanner.asp_planner import ASPPlanner
+from aspplanner.plasp.planner import ASPPlanner
 
 # We have to args: linear, upper_bound
 class UPASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):

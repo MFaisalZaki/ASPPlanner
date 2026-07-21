@@ -2,8 +2,8 @@
 
 import io
 
-from aspplanner.asp_planner import ASPPlanner, ENCODERS
-from aspplanner.compilers.asp_facts import (
+from aspplanner.plasp.planner import ASPPlanner, ENCODERS
+from aspplanner.lp_io import (
     ASPConstraint,
     ASPDirective,
     ASPFact,
