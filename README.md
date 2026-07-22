@@ -43,7 +43,9 @@ with OneshotPlanner(name="ASPPlanner") as planner:
     print(result.plan)
 ```
 
-Engine options: `params={"max_horizon": 50}` bounds the deepening search, and `params={"horizon": 10}` solves at one fixed horizon instead.
+Engine options: `params={"max_horizon": 50}` bounds the deepening search (default 1000), and `params={"horizon": 10}` solves at one fixed horizon instead.
+
+The optional `ABAPlanner` engine is selected the same way — `OneshotPlanner(name="ABAPlanner")`. Its options are `max_horizon` (default 1000) and `semantics` (default `"ST"`, aspforaba's extension semantics). Unlike `ASPPlanner`, it does not honor `timeout`, so bound the search with `max_horizon`. It needs the `aba` extra.
 
 ### Direct API
 
@@ -92,7 +94,7 @@ terms = planner.encoding_terms()     # encoding parsed into ASPTerm statements
 `encoding_terms()` returns typed statements (`ASPFact`, `ASPRule`, `ASPConstraint`, `ASPWeakConstraint`, `ASPDirective`) wrapping clingo AST nodes — filter or rewrite them programmatically, then write them back out:
 
 ```python
-from aspplanners.lp_io import parse_lp_file, dump_lp
+from aspplanners.lp_io import parse_lp_file, dump_lp, ASPRule
 
 terms = parse_lp_file("my-encoding.lp")
 rules = [t for t in terms if isinstance(t, ASPRule)]
@@ -101,13 +103,28 @@ dump_lp(terms, "normalized.lp")   # also accepts fact-builder terms and plain st
 
 The encoding is split into `#program base / step(t) / check(t)` parts; ground `base` + `step(1..h)` + `check(h)` and set the external `query(h)` to true to solve at horizon `h`.
 
+#### The ABA backend directly
+
+`ABAPlan` mirrors `PLASPPlanner`'s driver interface for the STRIPS-to-ABA backend (requires the `aba` extra):
+
+```python
+from aspplanners.abaplan.planner import ABAPlan
+
+planner = ABAPlan(problem)
+plan = planner.plan(max_horizon=100, semantics="ST")   # "ST" = stable extension semantics
+print(planner.status)   # PlanGenerationResultStatus of the last call
+print(planner.logs)
+```
+
+It runs the same shared front-end (compilation pipeline, map-back, validation) but grounds the problem and builds the ABA framework itself, so it takes no `compilationlist` and no `timeout` — bound the deepening search with `max_horizon`.
+
 ## Project layout
 
 - [aspplanners/plasp/](aspplanners/plasp/) — the default PLASP backend: `planner.py` (`PLASPPlanner` — core solver loop: compile → incremental ground/solve → extract → map back → validate), `encoder.py` (UP → ASP facts), `facts.py` (fact builders), and `encodings/` (clingo encodings per encoder type).
 - [aspplanners/abaplan/](aspplanners/abaplan/) — the optional ABA backend: `encoder.py` (`ABAEncoder` — STRIPS-to-ABA framework construction) and `planner.py` (`ABAPlan` — deepening search over aspforaba).
 - [aspplanners/common/](aspplanners/common/) — backend-agnostic front-end shared by both backends: compilation pipeline, plan validation, TIM typing.
 - [aspplanners/lp_io.py](aspplanners/lp_io.py) — generic ASP program I/O (`parse_lp`/`dump_lp` and the `ASPStatement` term family).
-- [aspplanners/up_engines.py](aspplanners/up_engines.py) — both UP engine adapters (`ASPPlanner`, `ABAPlanner`) and their supported `ProblemKind`s.
+- [aspplanners/up_engines.py](aspplanners/up_engines.py) — both UP engine adapters (`UPPLASPPlanner` and `UPABAPlanner`, registered as the `ASPPlanner` and `ABAPlanner` engines) and their supported `ProblemKind`s.
 - [tests/](tests/) — end-to-end tests (`pip install -e ".[dev]" && pytest`).
 
 ## License
