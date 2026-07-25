@@ -44,7 +44,7 @@ def parse_case(domain, problem_file):
 def test_pddl_instance_solves_and_lifts_correctly(case_id, domain, problem_file,
                                                   optimal_length):
     task = parse_case(domain, problem_file)
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(task)
     assert result.status == Status.SOLVED_SATISFICING, (
         f"{case_id}: expected a plan, got {result.status} "
@@ -73,7 +73,7 @@ def test_conditional_effect_semantics():
     """The quiet variant must disarm BEFORE opening the door; the trigger
     variant must see the alarm fire through the conditional effect."""
     quiet = parse_case("alarm", "problem-quiet.pddl")
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(quiet)
     names = [ai.action.name for ai in result.plan.actions]
     assert names == ["disarm", "open-door"]

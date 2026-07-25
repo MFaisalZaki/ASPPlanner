@@ -26,7 +26,7 @@ class PLASPPlanner:
     """Horizon-based planner: compiles a UP problem to ASP facts and searches
     for a plan with clingo, deepening the horizon until a model is found.
 
-    Registered with Unified Planning as the ``ASPPlanner`` engine.
+    Registered with Unified Planning as the ``PLASPPlanner`` engine.
 
     The solve status of the last `plan()` call is kept in `self.status`
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.

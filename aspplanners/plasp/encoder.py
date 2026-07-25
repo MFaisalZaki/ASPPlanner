@@ -43,6 +43,7 @@ from aspplanners.plasp.facts import (
     ASPInitialState,
     ASPGoalState,
     ASPNumGoal,
+    ASPNumComparison,
     is_numeric_comparison,
     parseexpr,
     flatten_atoms,
@@ -344,6 +345,10 @@ class PLASPEncoder:
             for atom in flatten_atoms(parseexpr(g)):
                 if isinstance(atom, ASPDisjunction):
                     ret_goals.append(ASPGoalDisjunction(atom, len(ret_goals)))
+                elif isinstance(atom, ASPNumComparison):
+                    # A comparison nested under an `and`/`not` the check above
+                    # did not see the top of; still a numGoal.
+                    ret_goals.append(ASPNumGoal(atom))
                 else:
                     ret_goals.append(ASPGoalState(atom))
         return ret_goals

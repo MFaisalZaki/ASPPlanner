@@ -1,4 +1,4 @@
-"""End-to-end tests for the ASPPlanner UP engine and its direct API.
+"""End-to-end tests for the PLASPPlanner UP engine and its direct API.
 
 Every solved plan must reference the *original* problem's actions and
 objects (not the internal grounded/renamed vocabulary) and validate with
@@ -158,7 +158,7 @@ def assert_plan_is_over_original_problem(problem, plan):
 
 def test_solves_and_maps_back_to_original_problem():
     problem = robot_line_problem()
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     assert len(result.plan.actions) == 3
@@ -167,7 +167,7 @@ def test_solves_and_maps_back_to_original_problem():
 
 def test_hyphenated_names_map_back():
     problem = robot_line_problem(sep="-")
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     assert_plan_is_over_original_problem(problem, result.plan)
@@ -181,7 +181,7 @@ def test_goal_already_satisfied_is_solved_with_empty_plan():
     problem.clear_goals()
     goal_fluent = problem.fluent("robot_at")
     problem.add_goal(goal_fluent(problem.object("loc_0")))
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     assert len(result.plan.actions) == 0
@@ -189,7 +189,7 @@ def test_goal_already_satisfied_is_solved_with_empty_plan():
 
 def test_unsolvable_reports_unsolvable():
     problem = robot_line_problem(connected_line=False)
-    with OneshotPlanner(name="ASPPlanner", params={"max_horizon": 5}) as planner:
+    with OneshotPlanner(name="PLASPPlanner", params={"max_horizon": 5}) as planner:
         result = planner.solve(problem)
     assert result.status == Status.UNSOLVABLE_INCOMPLETELY
     assert result.plan is None
@@ -202,7 +202,7 @@ def test_multiple_goals():
     problem.clear_goals()
     problem.add_goal(robot_at(problem.object("loc_3")))
     problem.add_goal(connected(problem.object("loc_0"), problem.object("loc_1")))
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     assert_plan_is_over_original_problem(problem, result.plan)
@@ -221,7 +221,7 @@ def test_negative_precondition():
     charge.add_effect(charged(), True)
     problem.add_action(charge)
     problem.add_goal(charged())
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     assert_plan_is_over_original_problem(problem, result.plan)
@@ -232,7 +232,7 @@ def test_negative_precondition():
 
 def test_numeric_counter():
     problem = numeric_counter_problem(threshold=3)
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     names = [ai.action.name for ai in result.plan.actions]
@@ -244,7 +244,7 @@ def test_numeric_goal_formula():
     """A goal stated as `battery(rover1) >= 2` (numeric comparison, not a
     boolean fluent) must plan and validate against the original problem."""
     problem = rover_recharge_problem(target=2)
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     names = [ai.action.name for ai in result.plan.actions]
@@ -265,7 +265,7 @@ def test_numeric_goal_greater_than_zero():
     problem.add_action(recharge)
     problem.add_goal(GT(battery(), 0))
 
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     assert [ai.action.name for ai in result.plan.actions] == ["recharge"]
@@ -286,7 +286,7 @@ def test_numeric_goal_unreachable_is_unsolvable():
     problem.add_action(recharge)
     problem.add_goal(LE(battery(), -1))
 
-    with OneshotPlanner(name="ASPPlanner", params={"max_horizon": 4}) as planner:
+    with OneshotPlanner(name="PLASPPlanner", params={"max_horizon": 4}) as planner:
         result = planner.solve(problem)
     assert result.status == Status.UNSOLVABLE_INCOMPLETELY
     assert result.plan is None
@@ -296,7 +296,7 @@ def test_conjunctive_numeric_and_boolean_goal():
     """A goal mixing a numeric comparison and a boolean fluent must satisfy
     both -- the AND split routes each conjunct to its own goal path."""
     problem = rover_recharge_problem(target=2, with_bool_goal=True)
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     names = [ai.action.name for ai in result.plan.actions]
@@ -334,7 +334,7 @@ def test_numeric_with_hyphenated_names():
     problem.add_object(unit)
     problem.add_goal(ready(unit))
 
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING
     names = [ai.action.name for ai in result.plan.actions]
@@ -352,7 +352,7 @@ def test_colliding_names_are_rejected():
 
 def test_timeout_reports_timeout():
     problem = robot_line_problem(n_locations=8)
-    with OneshotPlanner(name="ASPPlanner") as planner:
+    with OneshotPlanner(name="PLASPPlanner") as planner:
         result = planner.solve(problem, timeout=1e-9)
     assert result.status == Status.TIMEOUT
 
@@ -590,6 +590,123 @@ def test_a_disjunctive_goal_is_encoded_too():
     assert planner.status == Status.SOLVED_SATISFICING, planner.logs
     assert [ai.action.name for ai in plan.actions] == ["set_b"]
     assert any(line.startswith("goalOrGroup(")
+               for line in planner.compiled_task.fact_lines)
+
+
+def counter_problem(precondition=None, goal=None, start=0):
+    """`tick` increments `counter`; `finish` sets `done` under `precondition`.
+
+    A kit for the numeric-negation cases: the caller states the condition as a
+    function of the `counter` fluent expression.
+    """
+    from unified_planning.shortcuts import Fluent
+
+    counter, done = Fluent("counter", IntType()), Fluent("done", BoolType())
+    tick = InstantaneousAction("tick")
+    tick.add_increase_effect(counter(), 1)
+    finish = InstantaneousAction("finish")
+    if precondition is not None:
+        finish.add_precondition(precondition(counter()))
+    finish.add_effect(done(), True)
+
+    problem = Problem("counter_condition")
+    problem.add_fluent(counter, default_initial_value=start)
+    problem.add_fluent(done, default_initial_value=False)
+    problem.add_action(tick)
+    problem.add_action(finish)
+    problem.add_goal(goal(counter(), done()) if goal is not None else done())
+    return problem
+
+
+def test_negated_numeric_equality_is_encoded_as_a_neq_comparison():
+    """`not (counter = 0)` has no `holds` chain to negate -- it is the numeric
+    comparison's complement, checked against numval like any other one."""
+    from unified_planning.shortcuts import Equals
+
+    problem = counter_problem(precondition=lambda c: Not(Equals(c, 0)))
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    # `finish` is blocked at counter == 0, so one tick has to come first.
+    assert [ai.action.name for ai in plan.actions] == ["tick", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+    assert any("numPrecondition(" in line and ", neq," in line
+               for line in planner.compiled_task.fact_lines), \
+        sorted(planner.compiled_task.fact_lines)
+
+    # And the complement really is enforced: `not (counter != 0)` pins the
+    # counter to 0, which `tick` only ever moves away from.
+    planner = PLASPPlanner(counter_problem(
+        precondition=lambda c: Not(Not(Equals(c, 0))), start=1))
+    planner.plan(max_horizon=4)
+    assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, planner.logs
+
+
+def test_a_numeric_literal_in_a_disjunct_is_checked_against_numval():
+    """A disjunct's numeric literal cannot be an orDisjunct atom (it is read off
+    numval, not holds), so it gets its own orDisjunctNum vocabulary -- and the
+    disjunct is still enumerated when that is all it contains."""
+    from unified_planning.shortcuts import Equals, Or
+
+    # `done or counter != 2`, starting at counter == 2: neither disjunct holds
+    # initially, and only `tick` can make the numeric one true.
+    problem = counter_problem(goal=lambda c, done: Or(done, Not(Equals(c, 2))),
+                              start=2)
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=3)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert len(plan.actions) == 1, [ai.action.name for ai in plan.actions]
+    assert_plan_is_over_original_problem(problem, plan)
+
+    facts = planner.compiled_task.fact_lines
+    assert any(line.startswith("goalOrDisjunctNum(") and ", neq," in line
+               for line in facts), sorted(facts)
+    # The numeric-only disjunct is declared, or the group could never hold
+    # through it (a disjunct with no orDisjunct atom of its own).
+    assert len({line for line in facts
+                if line.startswith("goalOrDisjunctId(")}) == 2, sorted(facts)
+
+
+def test_a_numeric_disjunct_that_can_never_hold_is_not_vacuously_true():
+    """The group holds through a disjunct only when the disjunct does; a
+    numeric literal that no state satisfies must not let it through."""
+    from unified_planning.shortcuts import Equals, LT, Or
+
+    # `counter < 0 or counter = 100` -- the counter starts at 0 and ticks by
+    # one, so within the horizon neither disjunct is ever satisfied.
+    problem = counter_problem(
+        precondition=lambda c: Or(LT(c, 0), Equals(c, 100)))
+    planner = PLASPPlanner(problem)
+    planner.plan(max_horizon=4)
+    assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, planner.logs
+
+
+def test_a_double_negation_cancels_instead_of_staying_negative():
+    """De Morgan on `not (a and not X)` hands the inner `not X` a negative
+    polarity; the second `not` has to flip it back rather than re-assert it."""
+    from unified_planning.shortcuts import And, Equals, Fluent
+
+    counter, a = Fluent("counter", IntType()), Fluent("a", BoolType())
+    tick = InstantaneousAction("tick")
+    tick.add_increase_effect(counter(), 1)
+
+    problem = Problem("double_negation")
+    problem.add_fluent(counter, default_initial_value=0)
+    problem.add_fluent(a, default_initial_value=True)
+    problem.add_action(tick)
+    # `not (a and counter != 1)` == `not a or counter = 1`. `a` is true and
+    # nothing falsifies it, so the plan has to establish `counter = 1`.
+    problem.add_goal(Not(And(a(), Not(Equals(counter(), 1)))))
+
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick"]
+    assert_plan_is_over_original_problem(problem, plan)
+    # The inner negation cancelled: the disjunct is an equality, not its
+    # complement.
+    assert any(line.startswith("goalOrDisjunctNum(") and ", eq," in line
                for line in planner.compiled_task.fact_lines)
 
 

@@ -30,8 +30,12 @@
 #defined numAssign/3.
 #defined orGroup/2.
 #defined orDisjunct/5.
+#defined orDisjunctId/3.
+#defined orDisjunctNum/6.
 #defined goalOrGroup/1.
 #defined goalOrDisjunct/4.
+#defined goalOrDisjunctId/2.
+#defined goalOrDisjunctNum/5.
 
 #show occurs/2.
 
@@ -66,15 +70,23 @@ numval(V, X, 0) :- holds(V, value(V, X), 0), numVariable(V).
 % holding orDisjunct/5 literals grouped by disjunct. At least one disjunct has
 % to hold, and a disjunct holds when every literal in it does. An `exists` is
 % the same thing with the disjuncts indexed by the quantified variable's
-% binding, so the grounder enumerates them.
+% binding, so the grounder enumerates them. A disjunct's numeric literals are
+% orDisjunctNum/6 (checked against numval, like a numeric precondition), and
+% orDisjunctId/3 declares the disjunct itself so one made only of numeric
+% literals is enumerated as well.
 orDisjunctFails(A, G, D, t) :- orDisjunct(A, G, D, Variable, Value), not holds(Variable, Value, t - 1).
-orGroupHolds(A, G, t) :- orDisjunct(A, G, D, _, _), not orDisjunctFails(A, G, D, t).
+orDisjunctFails(A, G, D, t) :- orDisjunctNum(A, G, D, lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 >= X2 + C2.
+orDisjunctFails(A, G, D, t) :- orDisjunctNum(A, G, D, le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 > X2 + C2.
+orDisjunctFails(A, G, D, t) :- orDisjunctNum(A, G, D, eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 != X2 + C2.
+orDisjunctFails(A, G, D, t) :- orDisjunctNum(A, G, D, neq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 = X2 + C2.
+orGroupHolds(A, G, t) :- orDisjunctId(A, G, D), not orDisjunctFails(A, G, D, t).
 :- occurs(A, t), orGroup(A, G), not orGroupHolds(A, G, t).
 
 % Numeric preconditions: linear comparisons of value(V)+C sides at t-1.
 :- occurs(A, t), numPrecondition(A, lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 >= X2 + C2.
 :- occurs(A, t), numPrecondition(A, le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 > X2 + C2.
 :- occurs(A, t), numPrecondition(A, eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 != X2 + C2.
+:- occurs(A, t), numPrecondition(A, neq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 = X2 + C2.
 
 % Apply effects
 caused(Variable, Value, t) :- occurs(Action, t), postcondition(Action, Effect, Variable, Value), holds(VariablePre, ValuePre, t - 1) : precondition(Effect, VariablePre, ValuePre).
@@ -105,7 +117,11 @@ numval(V, X, t) :- holds(V, value(V, X), t), numVariable(V).
 % Disjunctive goals, read exactly as disjunctive preconditions are but against
 % the state at the goal step rather than the one before the action.
 goalDisjunctFails(G, D, t) :- goalOrDisjunct(G, D, Variable, Value), not holds(Variable, Value, t).
-goalOrGroupHolds(G, t) :- goalOrDisjunct(G, D, _, _), not goalDisjunctFails(G, D, t).
+goalDisjunctFails(G, D, t) :- goalOrDisjunctNum(G, D, lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 >= X2 + C2.
+goalDisjunctFails(G, D, t) :- goalOrDisjunctNum(G, D, le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 > X2 + C2.
+goalDisjunctFails(G, D, t) :- goalOrDisjunctNum(G, D, eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 != X2 + C2.
+goalDisjunctFails(G, D, t) :- goalOrDisjunctNum(G, D, neq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 = X2 + C2.
+goalOrGroupHolds(G, t) :- goalOrDisjunctId(G, D), not goalDisjunctFails(G, D, t).
 :- query(t), goalOrGroup(G), not goalOrGroupHolds(G, t).
 
 % Numeric goals: linear comparisons of value(V)+C sides at the goal step,
@@ -113,6 +129,7 @@ goalOrGroupHolds(G, t) :- goalOrDisjunct(G, D, _, _), not goalDisjunctFails(G, D
 :- query(t), numGoal(lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 >= X2 + C2.
 :- query(t), numGoal(le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 > X2 + C2.
 :- query(t), numGoal(eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 != X2 + C2.
+:- query(t), numGoal(neq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 = X2 + C2.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Temporal layer -- SMTPlan's happening encoding on top of the same horizon
@@ -252,6 +269,7 @@ hasRemaining(DA, t) :- remaining(DA, _, t).
 :- running(DA, t), numOverall(DA, lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 >= X2 + C2.
 :- running(DA, t), numOverall(DA, le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 > X2 + C2.
 :- running(DA, t), numOverall(DA, eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 != X2 + C2.
+:- running(DA, t), numOverall(DA, neq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 = X2 + C2.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Goal: no durative action left open (SMTPlan puts !run(a, H-1) in its goal)

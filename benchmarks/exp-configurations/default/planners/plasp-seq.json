@@ -1,6 +1,6 @@
 {
-    "planner-tag": "ASPPlanner-seq",
-    "up-planner-name": "ASPPlanner",
+    "planner-tag": "PLASPPlanner-seq",
+    "up-planner-name": "PLASPPlanner",
     "planner-params": {
         "encoding": "seq",
         "max_horizon": 1000,

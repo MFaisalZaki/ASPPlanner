@@ -120,7 +120,7 @@ def solve(args) -> int:
     try:
         import unified_planning.shortcuts as up_shortcuts
         from unified_planning.io import PDDLReader
-        import aspplanners  # noqa: F401  -- registers ASPPlanner and ABAPlanner
+        import aspplanners  # noqa: F401  -- registers PLASPPlanner and ABAPlanner
 
         # Every engine UP touches prints a credits block; across a sweep that is
         # tens of thousands of lines of slurm log saying the same thing.

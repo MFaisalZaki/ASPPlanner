@@ -56,9 +56,11 @@ class ASPDisjunction:
 
     @property
     def negated_fluent_names(self):
+        # Numeric literals are read off numval, not off a `holds(V, false)`
+        # chain, so they contribute nothing here (and carry no `value`).
         return {atom.up_expr._content.payload.name
                 for _id, atoms, _bindings in self.disjuncts for atom in atoms
-                if atom.value == 'false'}
+                if getattr(atom, 'value', None) == 'false'}
 
 
 def _quantified_bindings(f):
@@ -106,7 +108,10 @@ def parseexpr(f, t=None):
     if f.is_bool_constant():
         return ASPExpr(f, str(f).lower())
     if f.is_not():
-        return parseexpr(f.args[0], 'false')
+        # A negation flips the polarity it is parsed under rather than forcing
+        # it, so a double negation (which De Morgan on a nested `not (and ...)`
+        # readily produces) cancels instead of staying negative.
+        return parseexpr(f.args[0], 'true' if t == 'false' else 'false')
     negated = t == 'false'
     # A conjunction is what precondition/goal facts *are*, so it just flattens --
     # and so does a `forall`, which is a conjunction over the universe, emitted
@@ -131,11 +136,8 @@ def parseexpr(f, t=None):
         cmp = ASPNumComparison(f, 'lt' if f.is_lt() else 'le')
         return cmp.negated() if t == 'false' else cmp
     if f.is_equals() and (_is_numeric_fnode(f.args[0]) or _is_numeric_fnode(f.args[1])):
-        if t == 'false':
-            raise NotImplementedError(
-                "Negated numeric equality is not supported in the ASP encoding."
-            )
-        return ASPNumComparison(f, 'eq')
+        cmp = ASPNumComparison(f, 'eq')
+        return cmp.negated() if t == 'false' else cmp
     if f.is_equals():
         lhs, rhs = f.args[0], f.args[1]
         # Object-fluent equality: encode as a normal precondition where the
@@ -379,6 +381,8 @@ class ASPEquality(ASPTerm):
         self.value = value
         self.lhs = _equality_value_term(f.args[0])
         self.rhs = _equality_value_term(f.args[1])
+        # Neither side is a fluent, so nothing here has to be ranged.
+        self.bindings = []
 
     def __str__(self):
         op = '=' if self.value == 'true' else '!='
@@ -395,17 +399,28 @@ class ASPNumComparison(ASPTerm):
     Each side is a single fluent plus a constant -- expressions coupling two
     fluents (e.g. ``f + g``) raise; use the ABA backend for those.
     """
+
+    # Each comparison's complement, so a negated one is encoded as the opposite
+    # test rather than needing a `not` the encoding has no place for.
+    _NEGATION = {'lt': 'le', 'le': 'lt', 'eq': 'neq', 'neq': 'eq'}
+
     def __init__(self, f, op):
         self.up_expr = f
         self.op = op
         self.lhs = _num_side(f.args[0])
         self.rhs = _num_side(f.args[1])
 
+    @property
+    def bindings(self):
+        """``has(_, type(...))`` atoms for quantified variables on either side."""
+        return [b for var, _const in (self.lhs, self.rhs)
+                if var is not None for b in var.bindings]
+
     def negated(self):
-        # not(a < b) == b <= a ; not(a <= b) == b < a
+        # not(a < b) == b <= a ; not(a <= b) == b < a ; not(a = b) == b != a
         neg = ASPNumComparison.__new__(ASPNumComparison)
         neg.up_expr = self.up_expr
-        neg.op = {'lt': 'le', 'le': 'lt'}[self.op]
+        neg.op = self._NEGATION[self.op]
         neg.lhs, neg.rhs = self.rhs, self.lhs
         return neg
 
@@ -577,19 +592,28 @@ class ASPAction(ASPTerm):
 
         The group is a plain fact of the action; each disjunct contributes one
         orDisjunct per literal, under whatever bindings that disjunct needs --
-        which for an `exists` is what ranges it over the universe.
+        which for an `exists` is what ranges it over the universe. A numeric
+        literal goes to orDisjunctNum instead, since it is checked against
+        numval rather than holds; orDisjunctId declares the disjunct itself, so
+        a disjunct made only of numeric literals is still enumerated.
         """
         group = f'or({index})'
         facts = [f"orGroup({self._head}, {group}) :- action({self._head})."]
         for disjunct_id, atoms, bindings in disjunction.disjuncts:
             body = ', '.join([f'action({self._head})'] + list(bindings))
+            facts.append(
+                f"orDisjunctId({self._head}, {group}, {disjunct_id}) :- {body}.")
             for atom in atoms:
-                if not isinstance(atom, ASPExpr):
+                if isinstance(atom, ASPNumComparison):
+                    head = (f"orDisjunctNum({self._head}, {group}, {disjunct_id}, "
+                            f"{str(atom)})")
+                elif isinstance(atom, ASPExpr):
+                    head = (f"orDisjunct({self._head}, {group}, {disjunct_id}, "
+                            f"{str(atom)}, value({str(atom)}, {atom.value}))")
+                else:
                     raise NotImplementedError(
                         f"Unsupported literal {atom} in a disjunctive condition of action "
                         f"{self.up_action.name!r}.")
-                head = (f"orDisjunct({self._head}, {group}, {disjunct_id}, "
-                        f"{str(atom)}, value({str(atom)}, {atom.value}))")
                 facts.append(f"{head} :- {body}.")
         return facts
 
@@ -741,14 +765,19 @@ class ASPGoalDisjunction(ASPTerm):
     def __str__(self):
         lines = [f"goalOrGroup({self._group})."]
         for disjunct_id, atoms, bindings in self.disjunction.disjuncts:
+            heads = [f"goalOrDisjunctId({self._group}, {disjunct_id})"]
             for atom in atoms:
-                if not isinstance(atom, ASPExpr):
+                if isinstance(atom, ASPNumComparison):
+                    heads.append(f"goalOrDisjunctNum({self._group}, {disjunct_id}, "
+                                 f"{str(atom)})")
+                elif isinstance(atom, ASPExpr):
+                    heads.append(f"goalOrDisjunct({self._group}, {disjunct_id}, "
+                                 f"{str(atom)}, value({str(atom)}, {atom.value}))")
+                else:
                     raise NotImplementedError(
                         f"Unsupported literal {atom} in a disjunctive goal.")
-                head = (f"goalOrDisjunct({self._group}, {disjunct_id}, "
-                        f"{str(atom)}, value({str(atom)}, {atom.value}))")
-                lines.append(f"{head}." if not bindings
-                             else f"{head} :- {', '.join(bindings)}.")
+            lines += [f"{head}." if not bindings
+                      else f"{head} :- {', '.join(bindings)}." for head in heads]
         return '\n'.join(lines)
 
 
@@ -762,7 +791,7 @@ class ASPNumGoal(ASPTerm):
     numval at the queried timestep violates it.
     """
     def __init__(self, f):
-        self.cmp = parseexpr(f)
+        self.cmp = f if isinstance(f, ASPNumComparison) else parseexpr(f)
         assert isinstance(self.cmp, ASPNumComparison), (
             f"ASPNumGoal expects a numeric comparison, got {type(self.cmp)} for {f}"
         )
