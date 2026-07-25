@@ -37,14 +37,11 @@ from itertools import product
 from unified_planning.model import DurativeAction
 from unified_planning.shortcuts import CompilationKind, EffectKind
 
-from aspplanners.common.compilation import run_compilers
+from aspplanners.common.compilation import run_compilers, select_grounder
 from aspplanners.common.temporal import DEFAULT_TIME_SCALE, split_durative_actions
 
 
-# UP compilers run before the reduction. The grounder differs by task: the FD
-# reachability grounder prunes classical tasks well but rejects numeric and
-# temporal ones, so those use UP's generic grounder (which preserves int
-# fluents, increase/decrease/assign effects and durative actions).
+# UP compilers run before the reduction.
 _PRE_COMPILERS = [
     ["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING],
     ["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING],
@@ -53,10 +50,17 @@ _PRE_COMPILERS = [
 
 
 def _compilation_list(problem):
-    kind = problem.kind
-    generic = (kind.has_int_fluents() or kind.has_real_fluents()
-               or kind.has_continuous_time())
-    grounder = "up_grounder" if generic else "fast-downward-reachability-grounder"
+    """The pre-compilers plus whichever installed grounder takes this task.
+
+    The reduction is over ground STRIPS throughout -- aspforaba reasons about
+    propositional atoms -- so unlike the PLASP backend there is no lifted path
+    to fall back on and a task nothing grounds cannot be encoded at all.
+    """
+    grounder = select_grounder(problem.kind)
+    if grounder is None:
+        raise NotImplementedError(
+            f"No installed UP grounder supports this task ({problem.kind}); the ABA "
+            "reduction is over ground STRIPS and has no lifted path.")
     return _PRE_COMPILERS + [[grounder, CompilationKind.GROUNDING]]
 
 

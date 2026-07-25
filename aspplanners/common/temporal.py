@@ -63,6 +63,22 @@ def add_effect(action: Action, effect, timing=None) -> None:
         action.add_increase_effect(*where, effect.fluent, effect.value, effect.condition, forall=effect.forall)
 
 
+@dataclass(frozen=True)
+class FluentDuration:
+    """A duration the encoding reads off a static fluent instead of a number.
+
+    `(= ?duration (travel-time ?a ?b))` is only a number once the parameters are
+    bound, and the task is not necessarily ground by the time it reaches the
+    encoding. So the lookup is deferred: the fluent's value in the initial state,
+    times `multiplier` over `divisor`, is the duration in whole time units --
+    the same scaling :func:`time_unit` applies to a constant, just carried into
+    the encoding rather than performed here.
+    """
+    fluent: object
+    multiplier: int
+    divisor: int
+
+
 @dataclass
 class SnapDecomposition:
     """One durative action split into its two snap actions.
@@ -70,13 +86,14 @@ class SnapDecomposition:
     `start` and `end` are ordinary instantaneous actions holding the at-start
     and at-end conditions and effects; `overall` are the conditions that belong
     to neither, which the interval has to keep true throughout; `duration` is
-    the admissible duration interval in whole time units (see :func:`time_unit`).
+    the admissible duration interval in whole time units (see :func:`time_unit`),
+    or a :class:`FluentDuration` when the task states it as a static fluent.
     """
     action: DurativeAction
     start: InstantaneousAction
     end: InstantaneousAction
     overall: List
-    duration: Tuple[int, int]
+    duration: object
 
     @property
     def snap_names(self):
@@ -124,9 +141,10 @@ def time_unit(problem: Problem, actions: List[DurativeAction],
     """
     if time_scale < 1:
         raise ValueError(f"time_scale must be a positive integer, got {time_scale!r}")
-    bounds = [duration_bound(problem, da, side)
+    bounds = [value
               for da in actions
-              for side in (da.duration.lower, da.duration.upper)]
+              for side in (da.duration.lower, da.duration.upper)
+              for value in duration_bound(problem, da, side)]
     if any(bound <= 0 for bound in bounds):
         raise NotImplementedError(
             "A durative action has a non-positive duration bound; the happening "
@@ -140,27 +158,48 @@ def time_unit(problem: Problem, actions: List[DurativeAction],
     return Fraction(numerator, denominator) / time_scale
 
 
-def duration_bound(problem: Problem, da: DurativeAction, expression) -> Fraction:
-    """One side of a duration constraint as an exact rational.
+def duration_bound(problem: Problem, da: DurativeAction, expression) -> List[Fraction]:
+    """Every value one side of a duration constraint can take, as exact rationals.
 
-    Constants and static fluents are supported -- a static fluent (one no action
-    ever writes) is read off the initial state, which covers the common
-    ``(= ?duration (travel-time ?a ?b))`` shape once the task is ground. A
-    duration that depends on the state is not: an action's duration is fixed
-    when it starts.
+    A constant contributes itself, and so does a *ground* static fluent (one no
+    action ever writes), read off the initial state. A static fluent still
+    carrying parameters contributes every value it takes there -- one per
+    binding, and the encoding does not know which bindings survive, so all of
+    them go into the time grid. A duration that depends on the *state* is
+    rejected: an action's duration is fixed when it starts.
     """
-    if expression.is_int_constant() or expression.is_real_constant():
-        return Fraction(expression.constant_value())
-    if expression.is_fluent_exp():
-        written = {eff.fluent.fluent().name
-                   for a in problem.actions for eff in all_effects(a)}
-        if expression.fluent().name not in written:
-            value = problem.initial_values.get(expression)
-            if value is not None and (value.is_int_constant() or value.is_real_constant()):
-                return Fraction(value.constant_value())
+    values = _duration_values(problem, expression)
+    if values:
+        return values
     raise NotImplementedError(
         f"Duration bound {expression} of durative action {da.name!r} is neither a "
-        "constant nor a static fluent with a known initial value.")
+        "constant nor a static fluent with known initial values.")
+
+
+def _duration_values(problem: Problem, expression) -> List[Fraction]:
+    """The values `expression` can take, or [] if it is not a usable duration."""
+    if expression.is_int_constant() or expression.is_real_constant():
+        return [Fraction(expression.constant_value())]
+    if not expression.is_fluent_exp() or _is_written(problem, expression.fluent().name):
+        return []
+    if _is_ground(expression):
+        value = problem.initial_values.get(expression)
+        if value is not None and (value.is_int_constant() or value.is_real_constant()):
+            return [Fraction(value.constant_value())]
+        return []
+    return [Fraction(value.constant_value())
+            for key, value in problem.initial_values.items()
+            if key.fluent().name == expression.fluent().name
+            and (value.is_int_constant() or value.is_real_constant())]
+
+
+def _is_ground(expression) -> bool:
+    return not any(arg.is_parameter_exp() for arg in expression.args)
+
+
+def _is_written(problem: Problem, fluent_name: str) -> bool:
+    return any(eff.fluent.fluent().name == fluent_name
+               for action in problem.actions for eff in all_effects(action))
 
 
 def _decompose(problem: Problem, da: DurativeAction, unit: Fraction) -> SnapDecomposition:
@@ -226,14 +265,36 @@ def _timepoint(da: DurativeAction, timing) -> str:
     return 'start' if timing.is_from_start() else 'end'
 
 
-def _scaled_duration(problem: Problem, da: DurativeAction, unit: Fraction) -> Tuple[int, int]:
+def _scaled_duration(problem: Problem, da: DurativeAction, unit: Fraction):
     """The durative action's duration interval in whole time units.
 
-    An open bound is nudged inwards by one unit: on an integer grid,
-    ``?duration > lo`` is ``?duration >= lo + 1``.
+    ``(int, int)`` for numeric bounds; a :class:`FluentDuration` when the task
+    states the duration as a static fluent, whose value the encoding looks up
+    per parameter binding. An open bound is nudged inwards by one unit: on an
+    integer grid, ``?duration > lo`` is ``?duration >= lo + 1``.
     """
-    lower = duration_bound(problem, da, da.duration.lower) / unit
-    upper = duration_bound(problem, da, da.duration.upper) / unit
+    lower_expression, upper_expression = da.duration.lower, da.duration.upper
+    # A fluent that still carries parameters has no value yet, so its lookup is
+    # deferred to the encoding; a ground one (the task was pre-ground) resolves
+    # here like any constant.
+    deferred = [e for e in (lower_expression, upper_expression)
+                if e.is_fluent_exp() and not _is_ground(e)]
+    if deferred:
+        if (lower_expression != upper_expression
+                or da.duration.is_left_open() or da.duration.is_right_open()):
+            raise NotImplementedError(
+                f"Durative action {da.name!r} states a duration interval "
+                f"[{lower_expression}, {upper_expression}] over a fluent whose parameters "
+                "are not bound; a parameterised duration is only supported as a fixed "
+                "`(= ?duration (f ...))`.")
+        # unit = numerator/denominator, so `raw * denominator / numerator` is the
+        # duration in whole time units -- exact, because the unit divides every
+        # value the fluent takes (that is what time_unit computed it from).
+        return FluentDuration(fluent=lower_expression,
+                              multiplier=unit.denominator, divisor=unit.numerator)
+
+    lower = duration_bound(problem, da, lower_expression)[0] / unit
+    upper = duration_bound(problem, da, upper_expression)[0] / unit
     assert lower.denominator == 1 and upper.denominator == 1, (
         f"Duration of {da.name!r} is not a whole number of time units.")
     lower = int(lower) + (1 if da.duration.is_left_open() else 0)

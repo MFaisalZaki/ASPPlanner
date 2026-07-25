@@ -39,6 +39,7 @@ from aspplanners.plasp.facts import (
     ASPNumFluent,
     ASPAction,
     ASPDurativeAction,
+    action_declaration_atom,
     ASPInitialState,
     ASPGoalState,
     ASPNumGoal,
@@ -181,7 +182,7 @@ class PLASPEncoder:
         # Names are sanitized ('-' -> '_') at fact-rendering time by
         # asp_facts.asp_name and mapped back the same way during plan
         # extraction; make sure that mapping is injective for this task.
-        _check_asp_name_collisions(new_problem, [a.name for a in asp_actions])
+        _check_asp_name_collisions(new_problem, [a.name for a, _guard in asp_actions])
 
         # A fluent is "static" iff no action ever lists it in its effects.
         # Folding positive preconditions on such fluents into the action
@@ -199,7 +200,26 @@ class PLASPEncoder:
         # precondition that reads it.
         self._initialize_fluents(new_problem)
 
-        initial_state = set(ASPInitialState(fluent, value) for fluent, value in new_problem.initial_values.items() if not value.is_false())
+        # False initial values are dropped, because a variable that is only ever
+        # read as true needs no holds/3 chain for its false side and every such
+        # chain propagates through every step. A variable read as *false*
+        # somewhere does need one, though: `not holds(V, value(V,false), t-1)`
+        # is how the step rule checks a negative condition, and without the
+        # step-0 fact it can never be satisfied. That is what makes
+        # up_negative_conditions_remover unnecessary -- the encoding tracks the
+        # false value directly instead of a task needing a mirror fluent.
+        asp_actions = [(ASPAction(action, static_fluent_names, guard), guard)
+                       for action, guard in asp_actions]
+        goal_terms = list(chain.from_iterable(
+            self._generate_asp_goal_state(g) for g in new_problem.goals))
+        negated_fluents = set().union(*(a.negated_fluents for a, _guard in asp_actions)) \
+            if asp_actions else set()
+        negated_fluents |= {g.fluent_name for g in goal_terms
+                            if isinstance(g, ASPGoalState) and g.value == 'false'}
+
+        initial_state = set(
+            ASPInitialState(fluent, value) for fluent, value in new_problem.initial_values.items()
+            if not value.is_false() or fluent.fluent().name in negated_fluents)
         # This is a corner case where the initial state has no true fluents. In this case we need to add all the fluents of the problem.
         if len(initial_state) == 0:
             initial_state = set(ASPInitialState(fluent, value) for fluent, value in new_problem.initial_values.items())
@@ -211,9 +231,9 @@ class PLASPEncoder:
             '_has':            _render_facts(ASPHasConstant(obj) for obj in new_problem.all_objects),
             '_variables':      _render_facts(ASPFluent(fluent) for fluent in new_problem.fluents),
             '_num_variables':  _render_facts(ASPNumFluent(fluent) for fluent in new_problem.fluents if fluent.type.is_int_type() or fluent.type.is_real_type()),
-            '_actions':        _render_facts(ASPAction(action, static_fluent_names) for action in asp_actions),
+            '_actions':        _render_facts(action for action, _guard in asp_actions),
             '_initial_state':  _render_facts(initial_state),
-            '_goal_state':     _render_facts(chain.from_iterable(self._generate_asp_goal_state(g) for g in new_problem.goals)),
+            '_goal_state':     _render_facts(goal_terms),
             '_durative':       _render_facts(durative_facts),
             '_time':           {'minSeparation(1).'} if durative_facts else set(),
         }
@@ -238,13 +258,21 @@ class PLASPEncoder:
         real duration of one integer time unit, the ASPDurativeAction builders
         coupling each pair of snaps, a map from snap action name to
         ``(durative action name, 'start'|'end')`` for plan extraction, and the
-        full list of actions to render as ASPAction facts.
+        actions to render as ASPAction facts, each with the signature guard it
+        should be declared under (None for the ordinary per-parameter one).
         """
         unit, decompositions = split_durative_actions(problem, self.time_scale)
-        asp_actions = [a for a in problem.actions if not isinstance(a, DurativeAction)]
+        asp_actions = [(a, None) for a in problem.actions if not isinstance(a, DurativeAction)]
         durative_facts, snap_actions = [], {}
         for snap in decompositions:
-            asp_actions += [snap.start, snap.end]
+            # An end snap usually has no condition of its own, so on a lifted
+            # task nothing would narrow its parameters and it would instantiate
+            # for every type-consistent binding -- far more than the durative
+            # action itself has. Declaring it under its start snap fixes that:
+            # an end can only ever fire for a binding whose start exists, and
+            # the start's folded static preconditions carry over.
+            start_atom = action_declaration_atom(snap.start.name, snap.action.parameters)
+            asp_actions += [(snap.start, None), (snap.end, start_atom)]
             snap_actions[asp_name(snap.start.name)] = (snap.action.name, 'start')
             snap_actions[asp_name(snap.end.name)] = (snap.action.name, 'end')
             durative_facts.append(ASPDurativeAction(
@@ -331,7 +359,31 @@ class PLASPEncoder:
         fluentslist = list(chain.from_iterable([list(get_all_fluent_exp(task, f)) for f in task.fluents]))
         initialized_fluents  = list(task.explicit_initial_values.keys())
         unintialized_fluents = list(filter(lambda x: not x in initialized_fluents, fluentslist))
-        
+
+        def _default(fluent_exp):
+            """The value to lay down for a fluent instance with none of its own.
+
+            The fluent's own declared default comes first; then the per-type
+            defaults set above -- which a *bounded* type (`integer[0, 10]`) is
+            not a key of, since it is a distinct type object from `IntType()`,
+            so those fall through to a value derived from the type itself.
+            """
+            declared = task.fluents_defaults.get(fluent_exp.fluent())
+            if declared is not None:
+                return declared
+            default = task.initial_defaults.get(fluent_exp.type)
+            if default is not None:
+                return default
+            if fluent_exp.type.is_bool_type():
+                return _em.Bool(False)
+            if fluent_exp.type.is_int_type():
+                return _em.Int(max(0, fluent_exp.type.lower_bound or 0))
+            if fluent_exp.type.is_real_type():
+                return _em.Real(Fraction(max(0, fluent_exp.type.lower_bound or 0)))
+            raise NotImplementedError(
+                f"Fluent {fluent_exp} has no initial value and no default for its type "
+                f"{fluent_exp.type}; give it one in the problem.")
+
         # update the initial values for the fluents that are not initialized.
         for fe in unintialized_fluents:
-            task.set_initial_value(fe, task.initial_defaults[fe.type]) 
+            task.set_initial_value(fe, _default(fe))

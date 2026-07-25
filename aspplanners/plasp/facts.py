@@ -40,8 +40,19 @@ def parseexpr(f, t=None):
         return ASPExpr(f, str(f).lower())
     if f.is_not():
         return parseexpr(f.args[0], 'false')
-    if f.is_and() or f.is_or():
+    # A conjunction is what the encoding's precondition/goal facts *are*: every
+    # one of them has to hold. A disjunction is not expressible that way, so it
+    # only survives where De Morgan turns it into one -- `not (a or b)` is
+    # `not a and not b`. The other two shapes would quietly become conjunctions
+    # and lose plans, so they are rejected rather than encoded wrongly.
+    negated = t == 'false'
+    if f.is_and() if not negated else f.is_or():
         return [parseexpr(arg, t) for arg in f.args]
+    if f.is_and() or f.is_or():
+        raise NotImplementedError(
+            f"{'Negated conjunction' if negated else 'Disjunction'} {f} cannot be encoded "
+            "as plasp precondition/goal facts, which are conjunctive. Keep "
+            "up_disjunctive_conditions_remover in the compilation pipeline.")
     if f.is_lt() or f.is_le():
         cmp = ASPNumComparison(f, 'lt' if f.is_lt() else 'le')
         return cmp.negated() if t == 'false' else cmp
@@ -104,6 +115,19 @@ def _head_term(name, signature):
     if signature:
         inner += ',' + ','.join(variable for variable, _ in signature)
     return f'({inner})'
+
+
+def action_declaration_atom(name, parameters) -> str:
+    """The atom that declares an action, with each parameter as the ASP variable
+    :class:`ASPAction` binds it to.
+
+    Doubly wrapped -- ``action(action(("name", P1, ...)))`` -- because plasp tags
+    a term with its declaring predicate, so the *term* is ``action((...))`` and
+    the *fact* declaring it wraps that again. Useful as an :class:`ASPAction`
+    ``signature_guard``, which is how one action's parameter bindings get
+    restricted to another's.
+    """
+    return f'action(action({_head_term(name, _signature(parameters))}))'
 
 
 def _equality_value_term(arg):
@@ -315,7 +339,7 @@ class ASPGroundedFluent(ASPTerm):
 
 
 class ASPAction(ASPTerm):
-    def __init__(self, a, static_fluents=None):
+    def __init__(self, a, static_fluents=None, signature_guard=None):
         # static_fluents: set of fluent names whose value is fixed by the
         # initial state (no action has them in its effects). Positive
         # preconditions on these are folded into the action signature body
@@ -325,11 +349,20 @@ class ASPAction(ASPTerm):
         # parameter-narrowing comes from a static precondition (e.g. TPP
         # `next/2`, Mystery `attacks/2`/`eats/2`) ground to |obj|^arity and
         # blow past clasp's 28-bit ID space.
+        # signature_guard: an atom that already restricts every parameter, used
+        # instead of the per-parameter has(_, type(...)) atoms. An end snap
+        # passes its start snap's declaration atom, which is both tighter (the
+        # start's folded static preconditions carry over) and sound -- an end
+        # snap can only ever fire for a binding whose start exists.
         static_fluents = static_fluents or set()
         self.up_action = a
+        # Fluents this action reads as *false*, whose `holds(V, value(V,false))`
+        # chain therefore has to exist from step 0 on (see the encoder).
+        self.negated_fluents = set()
         self.signature = _signature(a.parameters)
         self._head = f"action({_head_term(a.name, self.signature)})"
-        self._sig_body = ', '.join(f'has({p[0]}, {str(p[1])})' for p in self.signature)
+        self._sig_body = signature_guard if signature_guard is not None else \
+            ', '.join(f'has({p[0]}, {str(p[1])})' for p in self.signature)
 
 
         # iterate over the preconditions.
@@ -351,6 +384,8 @@ class ASPAction(ASPTerm):
                     self._preconditions.append(f"{head} :- action({self._head}).")
                     continue
                 fluent_name = variable.up_expr._content.payload.name if isinstance(variable, ASPExpr) and variable.up_expr.is_fluent_exp() else None
+                if fluent_name is not None and variable.value == 'false':
+                    self.negated_fluents.add(fluent_name)
                 # Only positive (true-valued) static preconditions are safe
                 # to fold via initialState/2; closed-world handling for
                 # `not initialState(...)` is non-trivial so we leave
@@ -428,6 +463,8 @@ class ASPAction(ASPTerm):
                     # constraint on the rule itself.
                     self._postconditions[-1] = self._postconditions[-1][:-1] + f", {str(ca)}."
                     continue
+                if isinstance(ca, ASPExpr) and ca.up_expr.is_fluent_exp() and ca.value == 'false':
+                    self.negated_fluents.add(ca.up_expr._content.payload.name)
                 cond_head = (
                     f"precondition({effect_term}, {str(ca)}, "
                     f"value({str(ca)}, {ca.value}))"
@@ -474,16 +511,20 @@ class ASPDurativeAction(ASPTerm):
         self._start = f"action({_head_term(start_name, signature)})"
         self._end   = f"action({_head_term(end_name, signature)})"
 
-        lower, upper = duration_bounds
-        if lower > upper:
-            raise ValueError(
-                f"Durative action {da.name!r} has an empty duration interval "
-                f"[{lower}, {upper}] in scaled time units.")
-        if lower < 1:
-            raise NotImplementedError(
-                f"Durative action {da.name!r} can have zero duration; the happening "
-                "encoding needs every action to span at least one time unit.")
-        self._duration = str(lower) if lower == upper else f"{lower}..{upper}"
+        # Numeric bounds go straight into the fact; a duration stated as a
+        # static fluent becomes a lookup in the initial state instead, so it
+        # resolves per parameter binding at grounding time and the task never
+        # has to be ground first (see common.temporal.FluentDuration).
+        self._duration_body = None
+        if isinstance(duration_bounds, tuple):
+            lower, upper = duration_bounds
+            self._duration = str(lower) if lower == upper else f"{lower}..{upper}"
+        else:
+            fluent = parseexpr(duration_bounds.fluent, None)
+            self._duration = (f"RAWDURATION * {duration_bounds.multiplier} "
+                              f"/ {duration_bounds.divisor}")
+            self._duration_body = (
+                f"initialState({str(fluent)}, value({str(fluent)}, RAWDURATION))")
 
         self._overall = []
         for condition in overall_conditions:
@@ -507,11 +548,13 @@ class ASPDurativeAction(ASPTerm):
         # tags terms with their declaring predicate); guarding on it is what
         # instantiates these facts for exactly the bindings the snap has.
         started, ended = f"action({self._start})", f"action({self._end})"
+        duration_body = started if self._duration_body is None \
+            else f"{started}, {self._duration_body}"
         facts = [
             f"durativeAction({self._head}) :- {started}.",
             f"snap({self._head}, start, {self._start}) :- {started}.",
             f"snap({self._head}, end, {self._end}) :- {ended}.",
-            f"durationValue({self._head}, {self._duration}) :- {started}.",
+            f"durationValue({self._head}, {self._duration}) :- {duration_body}.",
         ]
         facts += [f"{atom} :- {started}." for atom in self._overall]
         return '\n'.join(facts)
@@ -532,6 +575,10 @@ class ASPInitialState(ASPStateVarVal):
 
 
 class ASPGoalState(ASPStateVarVal):
+    @property
+    def fluent_name(self):
+        return self.fluent.up_fluent.fluent().name
+
     def __str__(self):
         return f"goal({super().__str__()})."
 

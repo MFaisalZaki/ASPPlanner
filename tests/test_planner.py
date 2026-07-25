@@ -5,6 +5,8 @@ objects (not the internal grounded/renamed vocabulary) and validate with
 UP's sequential plan validator against the original problem.
 """
 
+import pytest
+
 import aspplanners  # noqa: F401 -- registers the engine
 from unified_planning.engines import PlanGenerationResultStatus as Status
 from unified_planning.shortcuts import (
@@ -383,3 +385,128 @@ def test_lp_program_is_dumpable():
     assert "initialState(" in program  # task facts present
     assert all(line.endswith(".") or line.startswith("%") or not line.strip()
                or line.startswith("#") for line in planner.task_facts.splitlines())
+
+
+# ---------------------------------------------------------------------------
+# Grounder selection
+# ---------------------------------------------------------------------------
+
+def test_the_grounder_is_the_one_that_supports_the_task():
+    """Which grounder runs is asked of the installed engines rather than
+    hard-coded, so a task moves to the right one as its kind changes."""
+    from unified_planning.shortcuts import Compiler
+
+    from aspplanners.common.compilation import GROUNDERS, select_grounder
+
+    classical = robot_line_problem()
+    numeric = numeric_counter_problem()
+    for problem in (classical, numeric):
+        chosen = select_grounder(problem.kind)
+        assert chosen in GROUNDERS
+        with Compiler(name=chosen) as compiler:
+            assert compiler.supports(problem.kind)
+        # And it is the most preferred one that does.
+        for rejected in GROUNDERS[:GROUNDERS.index(chosen)]:
+            with Compiler(name=rejected) as compiler:
+                assert not compiler.supports(problem.kind)
+
+    assert select_grounder(classical.kind, candidates=()) is None
+
+
+def test_only_a_reachability_grounder_runs_ahead_of_the_encoding():
+    """Pre-grounding only pays when the grounder prunes by reachability: gringo
+    grounds the task anyway, and the lifted encoding gives it more to prune with
+    than a plain enumerating grounder would. So a task no reachability grounder
+    takes is handed to clingo whole."""
+    from aspplanners.common.compilation import REACHABILITY_GROUNDERS, select_grounder
+
+    numeric = numeric_counter_problem()
+    assert select_grounder(numeric.kind, REACHABILITY_GROUNDERS) is None
+    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(numeric, None)
+    assert not any("grounder" in name for name, _kind in pipeline)
+
+    classical = robot_line_problem()
+    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(classical, None)
+    assert pipeline[-1][0] == "fast-downward-reachability-grounder"
+    assert pipeline[-1][0] in REACHABILITY_GROUNDERS
+
+
+# ---------------------------------------------------------------------------
+# What still has to be compiled away, and what does not
+# ---------------------------------------------------------------------------
+
+def negative_precondition_problem():
+    """`advance` needs NOT blocked, which already holds. `ready` is there so the
+    initial state has a true fluent -- without one the encoder's degenerate
+    "no true fluents" fallback emits everything and hides the question."""
+    from unified_planning.shortcuts import Fluent
+
+    blocked, ready, go = Fluent("blocked"), Fluent("ready"), Fluent("go")
+    advance = InstantaneousAction("advance")
+    advance.add_precondition(Not(blocked))
+    advance.add_precondition(ready)
+    advance.add_effect(go, True)
+
+    problem = Problem("negative_precondition")
+    problem.add_fluent(blocked, default_initial_value=False)
+    problem.add_fluent(ready, default_initial_value=True)
+    problem.add_fluent(go, default_initial_value=False)
+    problem.add_action(advance)
+    problem.add_goal(go)
+    return problem
+
+
+def test_negative_conditions_are_encoded_not_compiled_away():
+    """The encoding is multi-valued, so `value(V, false)` is a value like any
+    other and a mirror fluent per negatively-read one would be pure overhead."""
+    problem = negative_precondition_problem()
+    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None)
+    assert not any("negative" in name for name, _kind in pipeline)
+
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["advance"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_only_negatively_read_fluents_get_a_false_initial_value():
+    """A false initial value is what makes `not holds(V, value(V,false), t-1)`
+    satisfiable at step 0 -- but every such chain then propagates through every
+    step, so only the fluents that need one get one."""
+    planner = PLASPPlanner(negative_precondition_problem())
+    initial = planner.compiled_task.facts["_initial_state"]
+    assert any("blocked" in line and "false" in line for line in initial), initial
+    assert any("ready" in line and "true" in line for line in initial), initial
+    # `go` is false too, but is only ever read positively (in the goal).
+    assert not any("go" in line for line in initial), initial
+
+
+def test_a_disjunction_reaching_the_encoder_is_rejected_not_weakened():
+    """precondition/goal facts are read conjunctively, so an `or` that survives
+    the pipeline would quietly become an `and` and lose plans. The default
+    pipeline still removes them; bypassing that has to fail loudly."""
+    from unified_planning.shortcuts import CompilationKind, Fluent, Or
+
+    a, b, done = Fluent("a"), Fluent("b"), Fluent("done")
+    set_b = InstantaneousAction("set_b")
+    set_b.add_effect(b, True)
+    finish = InstantaneousAction("finish")
+    finish.add_precondition(Or(a, b))
+    finish.add_effect(done, True)
+
+    problem = Problem("disjunction")
+    for fluent in (a, b, done):
+        problem.add_fluent(fluent, default_initial_value=False)
+    problem.add_action(set_b)
+    problem.add_action(finish)
+    problem.add_goal(done)
+
+    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None)
+    assert any("disjunctive" in name for name, _kind in pipeline)
+    planner = PLASPPlanner(problem)
+    assert len(planner.plan(max_horizon=4).actions) == 2
+
+    without = [entry for entry in pipeline if "disjunctive" not in entry[0]]
+    with pytest.raises(NotImplementedError, match="conjunctive"):
+        PLASPPlanner(problem, compilationlist=without)

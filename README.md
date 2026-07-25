@@ -7,9 +7,10 @@ A lightweight planner that solves automated planning problems by compiling them 
 - **UP integration**: registers itself as the `ASPPlanner` engine on import, usable through `OneshotPlanner` like any other UP planner. Honors the `timeout` argument and reports proper statuses (`SOLVED_SATISFICING`, `UNSOLVABLE_INCOMPLETELY`, `TIMEOUT`).
 - **Plans in your vocabulary**: returned plans reference the actions and objects of the problem you passed in — every internal compilation stage (grounding, type inference, renaming) is mapped back before the plan is handed over.
 - **Multi-shot ASP search**: iterative-deepening over the horizon using clingo's incremental (iclingo-style) interface — each new horizon grounds only one additional step instead of regrounding the whole program.
-- **Numeric planning**: integer-valued fluents with constant-delta `increase`/`decrease`/`assign` effects and linear comparison preconditions (simple numeric planning). Numeric tasks solve on the lifted encoding; classical tasks are pre-grounded with Fast Downward's reachability grounder.
+- **Numeric planning**: integer-valued fluents with constant-delta `increase`/`decrease`/`assign` effects and linear comparison preconditions (simple numeric planning).
+- **Pre-grounding only where it pays**: gringo grounds the task either way, so a task is pre-ground only when a *reachability* grounder supports its `ProblemKind` — otherwise the whole job goes to clingo on the lifted encoding, which prunes bindings with the same static relations a plain enumerating grounder would have left in.
 - **Temporal planning**: PDDL 2.1 durative actions, encoded as the *happenings* of [SMTPlan](https://github.com/KCL-Planning/SMTPlan) — each durative action splits into its two snap actions, the timesteps carry the happening times, and the remaining-duration and over-all constraints tie the halves back together. Required concurrency works (match-cellar solves), and the result is a UP `TimeTriggeredPlan` checked with `up_time_triggered_validator`.
-- **Configurable compilation pipeline**: the UP compilers that run before ASP encoding are selected automatically per problem, or supplied explicitly via the `compilationlist` argument when you want full control over the preprocessing.
+- **Minimal preprocessing**: the UP compilers that run before ASP encoding are only the ones the encoding cannot express itself — negative conditions, for instance, are encoded directly rather than compiled into mirror fluents. They are selected automatically per problem, or supplied explicitly via the `compilationlist` argument when you want full control.
 - **Built-in validation**: every returned plan is checked against the *original* problem with UP's `sequential_plan_validator` before being handed back.
 - **Two backends**: the default `ASPPlanner` (PLASP-style ASP encoding, solved with clingo) and an optional `ABAPlanner` (STRIPS-to-ABA reduction, solved with [aspforaba](https://bitbucket.org/coreo-group/aspforaba)). Both share the UP front-end (compilation pipeline, map-back, validation) and register as UP engines on import.
 
@@ -81,15 +82,27 @@ for start, action, duration in plan.timed_actions:
 
 A timestep is a *happening*, and the model reports the gap between consecutive ones; a durative action becomes the pair of instantaneous **snap actions** carrying its at-start and at-end conditions and effects, plus a remaining-duration counter that must reach exactly zero where the end snap fires. Durative actions overlap freely, so domains with required concurrency (like the match-cellar above, where the fuse has to be mended strictly inside a burning match) are solved rather than rejected.
 
+Temporal tasks are solved on the *lifted* encoding — no grounder does reachability analysis on them, so pre-grounding would only duplicate gringo's work. A duration stated as a static function has no value until its parameters are bound, so the encoder defers that lookup into the ASP: `durationValue(...)` reads it off `initialState` per binding. The two snaps of a durative action ground to the same bindings the action itself does, because the end snap is declared under its start (it usually has no condition of its own, so nothing else would narrow it).
+
 What is covered: at-start / at-end / over-all conditions, at-start and at-end effects, fixed durations, duration inequalities (`(and (>= ?duration 2) (<= ?duration 5))`), and durations read off a static function (`(= ?duration (travel-time ?a ?b))`). What is not: PDDL+ processes and events, timed initial literals and timed goals, conditions or effects at an intermediate time, a durative action overlapping *itself*, and snap actions that have to be genuinely simultaneous (a happening carries one snap action, so they are sequentialised ε apart). The ABA backend additionally rejects numeric over-all conditions; use the PLASP backend for those.
 
 Clingo terms are integers, so happenings live on an integer time grid. `time_scale` (default 10) says how many times finer that grid is than the greatest common divisor of the task's durations, which makes ε — the minimum separation between two happenings — 1/10 of that gcd, matching SMTPlan's ε. Durations are normalised by their gcd first, so 100 and 150 become 20 and 30 rather than 1000 and 1500, and the discretisation is exact for rational durations rather than an approximation. Lower it (`PLASPPlanner(problem, time_scale=1)`) when a domain has large, coprime durations and no required concurrency: the encoding's remaining-duration recursion is quadratic in the largest scaled duration.
 
 #### Customizing the compilation pipeline
 
-Before a problem reaches the ASP encoder it is put through a list of UP compilers. By default `PLASPPlanner` derives this list from the problem: the quantifier, negative-condition and disjunctive-condition removers always run, and classical (non-numeric) tasks additionally get Fast Downward's reachability grounder — numeric tasks skip grounding and solve on the lifted encoding.
+Before a problem reaches the ASP encoder it is put through a list of UP compilers, kept to the ones the encoding genuinely cannot express — anything clingo can take is left to it:
 
-Pass `compilationlist` to take over that choice. Each entry is a `[engine_name, CompilationKind]` pair applied in order, and the list is used verbatim — the automatic numeric-vs-classical grounder selection is bypassed, so include or omit the grounder yourself:
+| compilation | run? | why |
+|---|---|---|
+| `up_quantifiers_remover` | yes | the fact vocabulary has no term for a quantified variable, so `forall`/`exists` are expanded over the universe first |
+| `up_disjunctive_conditions_remover` | yes | `precondition`/`goal` facts are read conjunctively, so an `or` has to become separate actions. One that reaches the encoder anyway is rejected rather than silently weakened into an `and` |
+| `up_negative_conditions_remover` | **no** | the encoding is multi-valued: `value(V, false)` is a value like any other, so a mirror fluent per negatively-read one would be pure overhead. The encoder just emits the false initial value for the fluents that are actually read as false |
+
+Then a grounder — but only one that prunes by **reachability analysis**. That is the whole reason to pre-ground ahead of an ASP encoding: gringo grounds the task anyway, so a grounder that merely enumerates type-consistent bindings does the same work twice and hands gringo a *bigger* program than the lifted encoding would have produced, whose action signature rules bind parameters via `has(_, type(...))` and fold static preconditions into the rule body.
+
+`aspplanners.common.compilation.select_grounder` asks the installed engines which of them supports the task's `ProblemKind`, restricted to `REACHABILITY_GROUNDERS`; if none does, the task goes to clingo whole. In practice classical tasks get Fast Downward's reachability grounder and numeric and temporal ones are solved lifted.
+
+Pass `compilationlist` to take over that choice. Each entry is a `[engine_name, CompilationKind]` pair applied in order, and the list is used verbatim — the automatic grounder selection is bypassed, so include or omit the grounder yourself:
 
 ```python
 from unified_planning.shortcuts import CompilationKind
@@ -139,7 +152,7 @@ print(planner.status)   # PlanGenerationResultStatus of the last call
 print(planner.logs)
 ```
 
-It runs the same shared front-end (compilation pipeline, map-back, validation) but grounds the problem and builds the ABA framework itself, so it takes no `compilationlist` and no `timeout` — bound the deepening search with `max_horizon`. Temporal tasks work here too — `ABAPlan(problem).plan()` solves match-cellar: `run` and the remaining duration become atoms of the framework, "the interval is still open" and "the duration has elapsed" become assumptions attacked by their contraries, and each step's gap is picked by a set of mutually contrary assumptions the same way its action is. Everything is propositional, so the framework grows with the square of the largest scaled duration and the ABA backend is markedly slower than the PLASP one on temporal tasks; lower `time_scale` (or use `ASPPlanner`) if that bites.
+It runs the same shared front-end (compilation pipeline, map-back, validation) but always grounds the problem — the reduction is over ground STRIPS, so unlike `PLASPPlanner` there is no lifted path to hand the task to, and it takes whichever grounder supports the kind rather than only a reachability one — and builds the ABA framework itself, so it takes no `compilationlist` and no `timeout`; bound the deepening search with `max_horizon`. Temporal tasks work here too — `ABAPlan(problem).plan()` solves match-cellar: `run` and the remaining duration become atoms of the framework, "the interval is still open" and "the duration has elapsed" become assumptions attacked by their contraries, and each step's gap is picked by a set of mutually contrary assumptions the same way its action is. Everything is propositional, so the framework grows with the square of the largest scaled duration and the ABA backend is markedly slower than the PLASP one on temporal tasks; lower `time_scale` (or use `ASPPlanner`) if that bites.
 
 ## Project layout
 

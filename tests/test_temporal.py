@@ -258,6 +258,69 @@ def test_time_scale_sets_the_happening_resolution(time_scale, solvable):
     assert (planner.status == Status.SOLVED_SATISFICING) == solvable, planner.logs
 
 
+# ---------------------------------------------------------------------------
+# The lifted temporal path
+# ---------------------------------------------------------------------------
+
+def _ground_actions(planner, horizon):
+    """The action/1 atoms gringo instantiates, and the total ground program."""
+    import clingo
+
+    control = clingo.Control(["-n", "1"])
+    control.load(planner.encoding_path)
+    control.add("base", [], planner.task_facts)
+    control.ground([("base", [])])
+    actions = {str(a.symbol) for a in control.symbolic_atoms.by_signature("action", 1)}
+    control.ground([("check", [clingo.Number(horizon)])]
+                   + [("step", [clingo.Number(t)]) for t in range(1, horizon + 1)])
+    return actions, sum(1 for _ in control.symbolic_atoms)
+
+
+def test_the_lifted_temporal_encoding_grounds_no_wider_than_a_pre_grounder():
+    """A temporal task is handed to clingo whole, because no reachability
+    grounder takes it and a plain enumerating one would only do gringo's work
+    twice. This pins that the lifted program really is no bigger: `drive` is
+    declared for 2 of the 9 type-consistent pairs, exactly as up_grounder leaves
+    it -- the start snap through its static `link` precondition, and the end snap
+    because it is declared under its start."""
+    from unified_planning.shortcuts import CompilationKind
+
+    problem = parse("tempdrive")
+    assert not any("grounder" in name for name, _kind
+                   in PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None))
+
+    pre_ground = [
+        ["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING],
+        ["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING],
+        ["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING],
+        ["up_grounder", CompilationKind.GROUNDING],
+    ]
+    lifted_actions, lifted_atoms = _ground_actions(PLASPPlanner(problem), 6)
+    _ground_names, ground_atoms = _ground_actions(
+        PLASPPlanner(problem, compilationlist=pre_ground), 6)
+
+    assert len(lifted_actions) == 6, sorted(lifted_actions)   # 2 drives + recharge, x2 snaps
+    assert lifted_atoms <= ground_atoms
+    drive_ends = {a for a in lifted_actions if "drive_end" in a}
+    assert len(drive_ends) == 2, (
+        f"the end snap ground to {len(drive_ends)} bindings, so it is not being declared "
+        f"under its start snap: {sorted(drive_ends)}")
+
+
+def test_a_parameterised_duration_is_looked_up_in_the_encoding():
+    """`(= ?duration (travel-time ?a ?b))` has no value until its parameters are
+    bound, so on a lifted task the durationValue fact reads the initial state
+    rather than carrying a number."""
+    planner = PLASPPlanner(parse("tempdrive"))
+    durations = [line for line in planner.compiled_task.facts["_durative"]
+                 if line.startswith("durationValue")]
+    drive, = [line for line in durations if "drive" in line]
+    assert "initialState(" in drive and "travel_time" in drive, drive
+    # recharge's bounds are numbers, so they stay numbers (2..5 at unit 1/10).
+    recharge, = [line for line in durations if "recharge" in line]
+    assert "20..50" in recharge and "initialState(" not in recharge, recharge
+
+
 def test_durations_are_scaled_exactly_not_rounded():
     problem = parse("matchcellar")
     planner = PLASPPlanner(problem, time_scale=10)
