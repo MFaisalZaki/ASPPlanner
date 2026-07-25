@@ -32,10 +32,12 @@
 #defined orDisjunct/5.
 #defined orDisjunctId/3.
 #defined orDisjunctNum/6.
+#defined orDisjunctSub/4.
 #defined goalOrGroup/1.
 #defined goalOrDisjunct/4.
 #defined goalOrDisjunctId/2.
 #defined goalOrDisjunctNum/5.
+#defined goalOrDisjunctSub/3.
 
 #show occurs/2.
 
@@ -74,7 +76,17 @@ numval(V, X, 0) :- holds(V, value(V, X), 0), numVariable(V).
 % orDisjunctNum/6 (checked against numval, like a numeric precondition), and
 % orDisjunctId/3 declares the disjunct itself so one made only of numeric
 % literals is enumerated as well.
+%
+% A `forall` over a disjunction carries its variable in the group term, so it is
+% one group per binding and the constraint below demands every one of them.
+% A disjunction *nested* in a disjunct is a group of its own, declared without an
+% orGroup/2 fact (nothing forces it by itself) and required by the orDisjunctSub/4
+% atom of the disjunct that owns it -- which is how the flat vocabulary states an
+% arbitrarily nested condition. The negative loop between orGroupHolds/3 and
+% orDisjunctFails/4 is only apparent: a subgroup is strictly nested inside its
+% parent, so no ground instance ever depends on itself.
 orDisjunctFails(A, G, D, t) :- orDisjunct(A, G, D, Variable, Value), not holds(Variable, Value, t - 1).
+orDisjunctFails(A, G, D, t) :- orDisjunctSub(A, G, D, SubGroup), not orGroupHolds(A, SubGroup, t).
 orDisjunctFails(A, G, D, t) :- orDisjunctNum(A, G, D, lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 >= X2 + C2.
 orDisjunctFails(A, G, D, t) :- orDisjunctNum(A, G, D, le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 > X2 + C2.
 orDisjunctFails(A, G, D, t) :- orDisjunctNum(A, G, D, eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 != X2 + C2.
@@ -88,8 +100,12 @@ orGroupHolds(A, G, t) :- orDisjunctId(A, G, D), not orDisjunctFails(A, G, D, t).
 :- occurs(A, t), numPrecondition(A, eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 != X2 + C2.
 :- occurs(A, t), numPrecondition(A, neq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 = X2 + C2.
 
-% Apply effects
-caused(Variable, Value, t) :- occurs(Action, t), postcondition(Action, Effect, Variable, Value), holds(VariablePre, ValuePre, t - 1) : precondition(Effect, VariablePre, ValuePre).
+% Apply effects. A conditional effect fires when every precondition/3 atom of its
+% Effect term holds at t-1 and every disjunctive condition it carries does too --
+% the orGroup/2 vocabulary above, keyed by the effect term instead of an action
+% (the constraint on orGroup/2 is guarded by occurs/2, so an effect's groups are
+% only ever read here).
+caused(Variable, Value, t) :- occurs(Action, t), postcondition(Action, Effect, Variable, Value), holds(VariablePre, ValuePre, t - 1) : precondition(Effect, VariablePre, ValuePre); orGroupHolds(Effect, G, t) : orGroup(Effect, G).
 
 % Numeric effects: constant-delta updates and constant assignments.
 caused(V, value(V, X + D), t) :- occurs(A, t), numEffect(A, V, D), holds(V, value(V, X), t - 1).
@@ -117,6 +133,7 @@ numval(V, X, t) :- holds(V, value(V, X), t), numVariable(V).
 % Disjunctive goals, read exactly as disjunctive preconditions are but against
 % the state at the goal step rather than the one before the action.
 goalDisjunctFails(G, D, t) :- goalOrDisjunct(G, D, Variable, Value), not holds(Variable, Value, t).
+goalDisjunctFails(G, D, t) :- goalOrDisjunctSub(G, D, SubGroup), not goalOrGroupHolds(SubGroup, t).
 goalDisjunctFails(G, D, t) :- goalOrDisjunctNum(G, D, lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 >= X2 + C2.
 goalDisjunctFails(G, D, t) :- goalOrDisjunctNum(G, D, le, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 > X2 + C2.
 goalDisjunctFails(G, D, t) :- goalOrDisjunctNum(G, D, eq, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t), numval(V2, X2, t), X1 + C1 != X2 + C2.

@@ -859,31 +859,210 @@ def test_the_default_pipeline_compiles_nothing_away():
         assert all("grounder" in name for name, _kind in pipeline), pipeline
 
 
-def test_a_disjunction_nested_inside_a_disjunct_is_rejected():
-    """`or(and(a, or(b, c)), d)` needs distribution into DNF before it is a flat
-    set of conjunctive disjuncts, which is the one shape the encoding does not
-    take -- so it says so instead of getting it wrong."""
-    from unified_planning.shortcuts import And, Fluent, Or
+def condition_problem(build_condition, initial, name="condition"):
+    """`finish` is the only action, and nothing in the problem changes a fluent.
 
-    a, b, c, d, done = (Fluent(name) for name in ("a", "b", "c", "d", "done"))
+    `build_condition(fluents)` states its precondition over the fluents named in
+    `initial` (a ``{name: value}`` map, with unary fluents written as
+    ``{name: {object: value}}``), so the task is solvable in exactly one step iff
+    that condition holds in the initial state -- which makes "is there a plan" a
+    direct read of what the encoding made of the condition.
+    """
+    from unified_planning.shortcuts import BoolType, Fluent
+
+    Thing = UserType("Thing")
+    objects = sorted({o for value in initial.values() if isinstance(value, dict) for o in value})
+    problem = Problem(name)
+    problem.add_objects([Object(o, Thing) for o in objects])
+
+    fluents = {}
+    for fluent_name, value in initial.items():
+        quantified = isinstance(value, dict)
+        fluents[fluent_name] = Fluent(fluent_name, BoolType(), **({"t": Thing} if quantified else {}))
+        problem.add_fluent(fluents[fluent_name], default_initial_value=False)
+        for obj, obj_value in (value.items() if quantified else [(None, value)]):
+            expression = fluents[fluent_name](problem.object(obj)) if quantified \
+                else fluents[fluent_name]()
+            problem.set_initial_value(expression, obj_value)
+
+    done = Fluent("done")
     finish = InstantaneousAction("finish")
-    finish.add_precondition(Or(And(a, Or(b, c)), d))
+    finish.add_precondition(build_condition(fluents))
     finish.add_effect(done, True)
-
-    problem = Problem("nested_disjunction")
-    for fluent in (a, b, c, d):
-        problem.add_fluent(fluent, default_initial_value=True)
     problem.add_fluent(done, default_initial_value=False)
     problem.add_action(finish)
     problem.add_goal(done)
+    return problem
 
-    with pytest.raises(NotImplementedError, match="itself disjunctive"):
-        PLASPPlanner(problem)
 
-    # ...and putting the remover back is exactly what the message asks for.
-    from unified_planning.shortcuts import CompilationKind
+def assert_condition_holds(problem, expected):
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=2)
+    if not expected:
+        assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, planner.logs
+        return planner
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+    return planner
 
-    planner = PLASPPlanner(problem, compilationlist=[
-        ["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING],
-    ])
-    assert len(planner.plan(max_horizon=3).actions) == 1
+
+@pytest.mark.parametrize("a, b", [(True, True), (True, False), (False, True), (False, False)])
+@pytest.mark.parametrize("negated", [False, True], ids=["implies", "not_implies"])
+def test_implies_is_stated_as_a_disjunction(a, b, negated):
+    """`a -> b` is `not a or b`, so the encoding states it with the disjunction
+    vocabulary it already has rather than needing a compiler to remove it (and
+    its negation is the conjunction De Morgan makes of that)."""
+    from unified_planning.shortcuts import Implies
+
+    def condition(fluents):
+        implication = Implies(fluents["a"](), fluents["b"]())
+        return Not(implication) if negated else implication
+
+    problem = condition_problem(condition, {"a": a, "b": b}, name="implies")
+    expected = (a and not b) if negated else (not a or b)
+    assert_condition_holds(problem, expected)
+
+
+def test_a_forall_over_a_disjunction_is_one_group_per_binding():
+    """`forall x . (r(x) -> c(x))` is not `(forall x . not r(x)) or (forall x . c(x))`.
+
+    Keeping them apart is what the quantified variable in the *group* term is
+    for: one group per binding, every one of which has to hold. This state
+    satisfies the condition binding by binding while satisfying neither disjunct
+    for every binding at once, so it separates the two readings.
+    """
+    from unified_planning.shortcuts import Forall, Implies, Variable
+
+    Thing = UserType("Thing")
+    x = Variable("x", Thing)
+
+    def condition(fluents):
+        return Forall(Implies(fluents["requires"](x), fluents["committed"](x)), x)
+
+    def problem(requires, committed):
+        return condition_problem(
+            condition, {"requires": requires, "committed": committed}, name="forall_or")
+
+    planner = assert_condition_holds(
+        problem({"o1": True, "o2": False}, {"o1": True, "o2": False}), True)
+    # o2 fails the second disjunct, o1 the first -- and it still holds.
+    groups = [line for line in planner.compiled_task.fact_lines if line.startswith("orGroup(")]
+    assert len(groups) == 1 and "or(0,Q_X)" in groups[0], groups
+
+    # ...while a binding that satisfies neither disjunct does break it.
+    assert_condition_holds(
+        problem({"o1": True, "o2": True}, {"o1": True, "o2": False}), False)
+
+
+@pytest.mark.parametrize("a", [True, False])
+@pytest.mark.parametrize("b", [True, False])
+@pytest.mark.parametrize("c", [True, False])
+@pytest.mark.parametrize("d", [True, False])
+def test_a_disjunction_nested_inside_a_disjunct_is_a_subgroup(a, b, c, d):
+    """`or(and(a, or(b, c)), d)` is not a flat set of conjunctive disjuncts, so
+    the inner disjunction becomes a group of its own that the outer disjunct
+    depends on (orDisjunctSub) rather than being distributed into DNF first."""
+    from unified_planning.shortcuts import And, Or
+
+    def condition(fluents):
+        f = {name: fluents[name]() for name in ("a", "b", "c", "d")}
+        return Or(And(f["a"], Or(f["b"], f["c"])), f["d"])
+
+    problem = condition_problem(condition, {"a": a, "b": b, "c": c, "d": d}, name="nested_or")
+    planner = assert_condition_holds(problem, (a and (b or c)) or d)
+    assert any(line.startswith("orDisjunctSub(") for line in planner.compiled_task.fact_lines)
+
+
+def test_a_subgroup_under_a_quantifier_is_one_subgroup_per_binding():
+    """The shape the `assembly` domain's `remove` action is built from: a
+    disjunct that holds when a *universally quantified* implication does. Each
+    binding is its own subgroup, all of which the disjunct needs."""
+    from unified_planning.shortcuts import And, Forall, Implies, Or, Variable
+
+    Thing = UserType("Thing")
+    x = Variable("x", Thing)
+
+    def condition(fluents):
+        return Or(And(fluents["transient"](),
+                      Forall(Implies(fluents["ordered"](x), fluents["placed"](x)), x)),
+                  fluents["spare"]())
+
+    def problem(transient, spare, ordered, placed):
+        return condition_problem(condition, {"transient": transient, "spare": spare,
+                                             "ordered": ordered, "placed": placed},
+                                 name="quantified_subgroup")
+
+    # The quantified implication holds binding by binding, so the first disjunct does.
+    assert_condition_holds(problem(True, False, {"o1": True, "o2": False},
+                                   {"o1": True, "o2": False}), True)
+    # o2 breaks the implication, and nothing else carries the disjunction.
+    assert_condition_holds(problem(True, False, {"o1": True, "o2": True},
+                                   {"o1": True, "o2": False}), False)
+    # ...unless the other disjunct holds outright.
+    assert_condition_holds(problem(False, True, {"o1": True, "o2": True},
+                                   {"o1": False, "o2": False}), True)
+
+
+def test_a_subgroup_inside_an_exists_is_per_binding():
+    """`exists x . (p(x) and (q or r(x)))`: the inner group is entered once per
+    binding of the `exists`, so its term repeats the variable. Sharing one
+    subgroup across the bindings would read it as `q or forall x . r(x)`, which
+    this state tells apart."""
+    from unified_planning.shortcuts import And, Exists, Or, Variable
+
+    Thing = UserType("Thing")
+    x = Variable("x", Thing)
+
+    def condition(fluents):
+        return Exists(And(fluents["p"](x), Or(fluents["q"](), fluents["r"](x))), x)
+
+    problem = condition_problem(
+        condition, {"p": {"o1": True, "o2": False}, "q": False,
+                    "r": {"o1": True, "o2": False}}, name="exists_subgroup")
+    planner = assert_condition_holds(problem, True)
+    subgroups = [line for line in planner.compiled_task.fact_lines
+                 if line.startswith("orDisjunctSub(")]
+    assert len(subgroups) == 1 and "Q_X" in subgroups[0].split(":-")[0], subgroups
+
+    # No binding satisfies both halves, though o1 satisfies one and o2 the other.
+    assert_condition_holds(condition_problem(
+        condition, {"p": {"o1": True, "o2": False}, "q": False,
+                    "r": {"o1": False, "o2": True}}, name="exists_subgroup"), False)
+
+
+@pytest.mark.parametrize("marked, fires", [({"o1": False, "o2": True}, True),
+                                           ({"o1": False, "o2": False}, False)])
+def test_a_conditional_effect_reads_its_disjunctive_condition(marked, fires):
+    """A conditional effect's condition can be disjunctive (here an `exists`),
+    which the encoding states as orGroup facts of the *effect* term -- the
+    caused/3 rule demands them exactly as the action constraint demands an
+    action's."""
+    from unified_planning.shortcuts import BoolType, Exists, Fluent, Variable
+
+    Thing = UserType("Thing")
+    marked_fluent = Fluent("marked", BoolType(), t=Thing)
+    done = Fluent("done")
+    x = Variable("x", Thing)
+
+    sweep = InstantaneousAction("sweep")
+    sweep.add_effect(done, True, condition=Exists(marked_fluent(x), x))
+
+    problem = Problem("conditional_disjunction")
+    problem.add_fluent(marked_fluent, default_initial_value=False)
+    problem.add_fluent(done, default_initial_value=False)
+    problem.add_objects([Object(name, Thing) for name in sorted(marked)])
+    for name, value in marked.items():
+        problem.set_initial_value(marked_fluent(problem.object(name)), value)
+    problem.add_action(sweep)
+    problem.add_goal(done)
+
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=3)
+    assert any(line.startswith("orGroup(effect(") for line in planner.compiled_task.fact_lines)
+    if not fires:
+        assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, planner.logs
+        return
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["sweep"]
+    assert_plan_is_over_original_problem(problem, plan)

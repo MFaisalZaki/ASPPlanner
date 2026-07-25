@@ -36,43 +36,99 @@ def flatten_atoms(parsed):
     return atoms
 
 
+class ASPDisjunct:
+    """One disjunct of an :class:`ASPDisjunction`: everything in it has to hold.
+
+    The parsed disjunct body splits three ways. `atoms` are the state literals,
+    which become ``orDisjunct``/``orDisjunctNum`` facts. `tests` are equality
+    constraints between non-fluent terms, which the grounder settles: they go in
+    the *body* of the disjunct's rules, so a disjunct whose test fails is simply
+    never declared and cannot satisfy its group. `subgroups` are nested
+    disjunctions, which become groups of their own (see :func:`_or_facts`).
+
+    `id_term` identifies the disjunct within its group, `own_vars` are the ASP
+    variables an ``exists`` disjunct introduces -- they index its id and stay in
+    scope for its subgroups -- and `bindings` are the ``has(_, type(...))`` atoms
+    the disjunct's rule bodies need.
+    """
+
+    def __init__(self, id_term, parsed, own_vars=(), extra_bindings=()):
+        self.id = id_term
+        self.own_vars = list(own_vars)
+        self.atoms, self.tests, self.subgroups = [], [], []
+        for item in flatten_atoms(parsed):
+            if isinstance(item, ASPDisjunction):
+                self.subgroups.append(item)
+            elif isinstance(item, ASPEquality):
+                self.tests.append(item)
+            else:
+                self.atoms.append(item)
+        self.bindings = sorted(set(extra_bindings) |
+                               {b for item in self.atoms + self.tests for b in item.bindings})
+
+
 class ASPDisjunction:
     """A disjunctive condition: at least one of its disjuncts has to hold.
 
     Not an :class:`~aspplanners.lp_io.ASPTerm`, because it has no rendering of
     its own -- it is emitted as ``orGroup``/``orDisjunct`` facts by whoever owns
     the condition, which is the only place the action or goal it belongs to is
-    known (see :class:`ASPAction`).
+    known (see :func:`_or_facts`).
 
-    Each disjunct is ``(id_term, atoms, bindings)``: `atoms` all have to hold for
-    that disjunct to, and `bindings` are the ``has(_, type(...))`` atoms its rule
-    body needs. An ``or`` numbers its disjuncts 0, 1, ...; an ``exists`` is the
-    same structure with the disjuncts indexed by the quantified variable's
-    binding, so the grounder enumerates them instead of a compiler.
+    An ``or`` numbers its disjuncts 0, 1, ...; an ``exists`` is the same
+    structure with the disjuncts indexed by the quantified variable's binding,
+    so the grounder enumerates them instead of a compiler. A disjunction under a
+    ``forall`` additionally carries that quantifier's variables as `group_vars`
+    (see :meth:`universally_bound`).
     """
 
-    def __init__(self, disjuncts):
+    def __init__(self, disjuncts, group_vars=(), group_bindings=()):
         self.disjuncts = disjuncts
+        self.group_vars = list(group_vars)
+        self.group_bindings = list(group_bindings)
+
+    def universally_bound(self, names, bindings):
+        """Put this disjunction under a ``forall`` over `names`.
+
+        The quantified variables end up in the *group's* term, so the grounder
+        makes one group per binding and every one of them has to hold. Without
+        that, all bindings would pool into the disjuncts of a single group,
+        which states ``(forall x . p(x)) or (forall x . q(x))`` rather than the
+        ``forall x . (p(x) or q(x))`` that was written.
+        """
+        self.group_vars = list(names) + self.group_vars
+        self.group_bindings = list(bindings) + self.group_bindings
+        return self
 
     @property
     def negated_fluent_names(self):
         # Numeric literals are read off numval, not off a `holds(V, false)`
         # chain, so they contribute nothing here (and carry no `value`).
-        return {atom.up_expr._content.payload.name
-                for _id, atoms, _bindings in self.disjuncts for atom in atoms
-                if getattr(atom, 'value', None) == 'false'}
+        names = set()
+        for disjunct in self.disjuncts:
+            names |= {atom.up_expr._content.payload.name for atom in disjunct.atoms
+                      if isinstance(atom, ASPExpr) and atom.up_expr.is_fluent_exp()
+                      and atom.value == 'false'}
+            for subgroup in disjunct.subgroups:
+                names |= subgroup.negated_fluent_names
+        return names
 
 
-def _quantified_bindings(f):
-    """``(disjunct id term, has(...) bindings)`` for a quantifier's variables."""
+def _quantified_vars(f):
+    """``(ASP variable names, has(...) bindings)`` for a quantifier's variables."""
     variables = list(f.variables())
     names = [QUANTIFIED_PREFIX + asp_name(v.name).upper() for v in variables]
     bindings = [f'has({name}, {str(ASPType(v.type))})' for name, v in zip(names, variables)]
-    return (names[0] if len(names) == 1 else f"({','.join(names)})"), bindings
+    return names, bindings
 
 
-def _as_disjuncts(f, t, index):
-    """The disjuncts one argument of a disjunction contributes.
+def _quantified_id(names):
+    """The disjunct id an ``exists``'s variables index its disjuncts by."""
+    return names[0] if len(names) == 1 else f"({','.join(names)})"
+
+
+def _as_disjunct(f, t, index):
+    """The disjunct one argument of a disjunction contributes.
 
     A conjunctive argument is one disjunct numbered `index`; an ``exists`` is a
     family of them indexed by its variables' bindings, which is what lets an
@@ -80,21 +136,10 @@ def _as_disjuncts(f, t, index):
     """
     quantified = f.is_exists() if t != 'false' else f.is_forall()
     if quantified:
-        disjunct_id, bindings = _quantified_bindings(f)
-        atoms = flatten_atoms(parseexpr(f.arg(0), t))
-        _reject_nested(f, atoms)
-        return [(f"({index},{disjunct_id})", atoms, bindings)]
-    atoms = flatten_atoms(parseexpr(f, t))
-    _reject_nested(f, atoms)
-    return [(str(index), atoms, sorted({b for a in atoms for b in a.bindings}))]
-
-
-def _reject_nested(f, atoms):
-    if any(isinstance(a, ASPDisjunction) for a in atoms):
-        raise NotImplementedError(
-            f"Disjunct {f} is itself disjunctive; the encoding states a disjunction as a "
-            "flat set of conjunctive disjuncts, so nesting one inside another needs "
-            "up_disjunctive_conditions_remover in the compilation pipeline.")
+        names, bindings = _quantified_vars(f)
+        return ASPDisjunct(f"({index},{_quantified_id(names)})", parseexpr(f.arg(0), t),
+                           own_vars=names, extra_bindings=bindings)
+    return ASPDisjunct(str(index), parseexpr(f, t))
 
 
 def parseexpr(f, t=None):
@@ -112,6 +157,12 @@ def parseexpr(f, t=None):
         # it, so a double negation (which De Morgan on a nested `not (and ...)`
         # readily produces) cancels instead of staying negative.
         return parseexpr(f.args[0], 'true' if t == 'false' else 'false')
+    if f.is_implies():
+        # `a -> b` is `not a or b`, so restating it that way hands it to the
+        # disjunction machinery below (and to De Morgan when it is negated),
+        # rather than needing a compiler to have removed it beforehand.
+        manager = f.environment.expression_manager
+        return parseexpr(manager.Or(manager.Not(f.arg(0)), f.arg(1)), t)
     negated = t == 'false'
     # A conjunction is what precondition/goal facts *are*, so it just flattens --
     # and so does a `forall`, which is a conjunction over the universe, emitted
@@ -120,18 +171,26 @@ def parseexpr(f, t=None):
     if f.is_and() if not negated else f.is_or():
         return [parseexpr(arg, t) for arg in f.args]
     if f.is_forall() if not negated else f.is_exists():
-        return parseexpr(f.arg(0), t)
+        # The body's atoms keep the variable free, so every one of them is
+        # emitted once per binding -- a conjunction over the universe. A
+        # *disjunction* in the body cannot be left free that way, though: it has
+        # to become one group per binding, which is what universally_bound
+        # records for whoever emits it.
+        parsed = parseexpr(f.arg(0), t)
+        names, bindings = _quantified_vars(f)
+        for item in flatten_atoms(parsed):
+            if isinstance(item, ASPDisjunction):
+                item.universally_bound(names, bindings)
+        return parsed
     # A disjunction is not conjunctive, so it becomes an ASPDisjunction that the
     # owning action or goal emits as its own orGroup/orDisjunct facts. An
     # `exists` is one too, with the disjuncts indexed by its variables.
     if f.is_or() or f.is_and():
-        return ASPDisjunction([d for i, arg in enumerate(f.args)
-                               for d in _as_disjuncts(arg, t, i)])
+        return ASPDisjunction([_as_disjunct(arg, t, i) for i, arg in enumerate(f.args)])
     if f.is_exists() or f.is_forall():
-        disjunct_id, bindings = _quantified_bindings(f)
-        atoms = flatten_atoms(parseexpr(f.arg(0), t))
-        _reject_nested(f, atoms)
-        return ASPDisjunction([(disjunct_id, atoms, bindings)])
+        names, bindings = _quantified_vars(f)
+        return ASPDisjunction([ASPDisjunct(_quantified_id(names), parseexpr(f.arg(0), t),
+                                           own_vars=names, extra_bindings=bindings)])
     if f.is_lt() or f.is_le():
         cmp = ASPNumComparison(f, 'lt' if f.is_lt() else 'le')
         return cmp.negated() if t == 'false' else cmp
@@ -156,11 +215,7 @@ def parseexpr(f, t=None):
         # Parameter/object equality: lifted-plasp folds this into the action
         # signature body so only matching bindings instantiate the action.
         return ASPEquality(f, 'true' if t is None else t)
-    if f.is_implies():
-        assert False, "Implies should have been removed before."
-    else:
-        raise TypeError(f"Unsupported thing: {f} of type {type(f)}")
-    return []
+    raise TypeError(f"Unsupported thing: {f} of type {type(f)}")
 
 def is_numeric_comparison(f):
     """Is this FNode a numeric comparison (or the negation of one)?
@@ -206,12 +261,22 @@ def action_declaration_atom(name, parameters) -> str:
     return f'action(action({_head_term(name, _signature(parameters))}))'
 
 
+def _equality_term(arg):
+    """``(term, has(...) bindings)`` for one side of an equality.
+
+    A ground object, an action parameter, or a quantified variable -- the same
+    three things a fluent argument can be, rendered the same way (see
+    :func:`_arg_term`), since an equality is a test between such terms.
+    """
+    try:
+        term, asp_type, kind = _arg_term(arg)
+    except TypeError:
+        raise TypeError(f"Unsupported equality term: {arg} of type {type(arg)}") from None
+    return term, ([f'has({term}, {str(asp_type)})'] if kind == 'quantified' else [])
+
+
 def _equality_value_term(arg):
-    if arg.is_object_exp():
-        return f'constant("{asp_name(arg.object().name)}")'
-    if arg.is_parameter_exp():
-        return asp_name(arg.parameter().name).upper()
-    raise TypeError(f"Unsupported equality term: {arg} of type {type(arg)}")
+    return _equality_term(arg)[0]
 
 # Prefix for the ASP variable a *quantified* variable renders as, keeping it
 # clear of an action parameter that happens to share its name.
@@ -379,10 +444,12 @@ class ASPEquality(ASPTerm):
     def __init__(self, f, value):
         self.up_expr = f
         self.value = value
-        self.lhs = _equality_value_term(f.args[0])
-        self.rhs = _equality_value_term(f.args[1])
-        # Neither side is a fluent, so nothing here has to be ranged.
-        self.bindings = []
+        self.lhs, lhs_bindings = _equality_term(f.args[0])
+        self.rhs, rhs_bindings = _equality_term(f.args[1])
+        # Neither side is a fluent, so the only thing to range is a quantified
+        # variable -- a test is not what binds one (`Q != X` is unsafe on its
+        # own), so its has(_, type(...)) atom travels with the test.
+        self.bindings = lhs_bindings + rhs_bindings
 
     def __str__(self):
         op = '=' if self.value == 'true' else '!='
@@ -442,6 +509,83 @@ class ASPGroundedFluent(ASPTerm):
     def __str__(self):
         _ret_str = f"{self._head}," + ','.join(str(a) for a in self._arity) if len(self._arity) > 0 else f"{self._head}"
         return f'variable(({_ret_str}))'
+
+
+def _dedup(items):
+    """Order-preserving deduplication, for rule bodies assembled from parts."""
+    seen, unique = set(), []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
+def _or_facts(disjunction, gid, owner=None, body_prefix=(), scope_vars=(),
+              scope_bindings=(), parent=None):
+    """The facts stating one disjunctive condition, nested groups and all.
+
+    `owner` is the term the condition belongs to -- an action, or the effect
+    term of a conditional effect -- and is the first argument of every fact; a
+    *goal* has no owner and gets the goalOr* vocabulary instead. `gid` numbers
+    the group within its owner, `body_prefix` are the atoms every one of its
+    rules needs (the owning action's declaration atom).
+
+    Two things make a group more than a flat list of disjuncts:
+
+      * a disjunction under a ``forall`` carries the quantified variables in its
+        own group term (`ASPDisjunction.group_vars`), so the grounder makes one
+        group per binding and the encoding's constraint demands all of them;
+      * a disjunction *nested* inside a disjunct becomes a group of its own,
+        declared without an ``orGroup`` fact -- nothing forces it on its own --
+        and pulled in by the ``orDisjunctSub`` atom of the disjunct that owns
+        it, whose failure is that disjunct's failure. `parent` is that owning
+        disjunct, and is None for a top-level group.
+
+    A subgroup's term repeats every variable in scope at its point of use, so
+    two bindings of an enclosing quantifier never share (and thereby merge) a
+    group.
+    """
+    prefix = 'or' if owner is not None else 'goalOr'
+    owner_args = [owner] if owner is not None else []
+
+    def fact(suffix, args, body):
+        head = f"{prefix}{suffix}({', '.join(owner_args + args)})"
+        return f"{head}." if not body else f"{head} :- {', '.join(body)}."
+
+    variables = list(scope_vars) + disjunction.group_vars
+    group = f"or({gid})" if not variables else f"or({gid},{','.join(variables)})"
+    body = _dedup(list(body_prefix) + list(scope_bindings) + disjunction.group_bindings)
+
+    if parent is None:
+        facts = [fact('Group', [group], body)]
+    else:
+        parent_group, parent_id, parent_body = parent
+        facts = [fact('DisjunctSub', [parent_group, parent_id, group],
+                      _dedup(list(parent_body) + disjunction.group_bindings))]
+
+    for index, disjunct in enumerate(disjunction.disjuncts):
+        # An equality test goes in the body: a disjunct whose test fails is not
+        # declared at all, which is exactly it failing.
+        disjunct_body = _dedup(body + disjunct.bindings + [str(test) for test in disjunct.tests])
+        facts.append(fact('DisjunctId', [group, disjunct.id], disjunct_body))
+        for atom in disjunct.atoms:
+            if isinstance(atom, ASPNumComparison):
+                facts.append(fact('DisjunctNum', [group, disjunct.id, str(atom)], disjunct_body))
+            elif isinstance(atom, ASPExpr):
+                facts.append(fact('Disjunct', [group, disjunct.id, str(atom),
+                                               f'value({str(atom)}, {atom.value})'],
+                                  disjunct_body))
+            else:
+                raise NotImplementedError(
+                    f"Unsupported literal {atom} in a disjunctive condition of "
+                    f"{owner if owner is not None else 'a goal'}.")
+        for sub_index, subgroup in enumerate(disjunct.subgroups):
+            facts += _or_facts(subgroup, f"({gid},{index},{sub_index})", owner=owner,
+                               scope_vars=variables + disjunct.own_vars,
+                               scope_bindings=disjunct_body,
+                               parent=(group, disjunct.id, disjunct_body))
+    return facts
 
 
 class ASPAction(ASPTerm):
@@ -555,10 +699,6 @@ class ASPAction(ASPTerm):
         # every binding's condition to hold simultaneously).
         params_tail = (',' + ','.join(p[0] for p in self.signature)) if self.signature else ''
         for idx, eff in enumerate(a.conditional_effects):
-            assert not eff.condition.is_or(), (
-                f"Disjunctive condition in conditional effect of action {a.name} is not supported; "
-                "apply DisjunctiveConditionsRemover to effect conditions or split the action."
-            )
             variable = parseexpr(eff.fluent)
             value    = str(eff.value).lower()
             effect_term = f'effect((cond,"{asp_name(a.name)}",{idx}{params_tail}))'
@@ -568,9 +708,18 @@ class ASPAction(ASPTerm):
             )
             self._postconditions.append(f"{head} :- action({self._head}).")
 
-            cond_atoms = parseexpr(eff.condition)
-            cond_atoms = [cond_atoms] if not isinstance(cond_atoms, list) else cond_atoms
-            for ca in cond_atoms:
+            cond_group_index = 0
+            for ca in flatten_atoms(parseexpr(eff.condition)):
+                if isinstance(ca, ASPDisjunction):
+                    # The effect's own orGroup facts; the encoding's caused/3
+                    # rule requires every group of the effect term to hold, the
+                    # same way the action constraint does for an action's.
+                    self._postconditions += _or_facts(
+                        ca, str(cond_group_index), owner=effect_term,
+                        body_prefix=[f'action({self._head})'])
+                    self.negated_fluents |= ca.negated_fluent_names
+                    cond_group_index += 1
+                    continue
                 if isinstance(ca, ASPEquality):
                     # QuantifiersRemover.simplify() should ground-evaluate
                     # parameter/object equalities away. If one survives here
@@ -579,13 +728,22 @@ class ASPAction(ASPTerm):
                     # constraint on the rule itself.
                     self._postconditions[-1] = self._postconditions[-1][:-1] + f", {str(ca)}."
                     continue
+                if isinstance(ca, ASPNumComparison):
+                    raise NotImplementedError(
+                        f"Numeric condition {ca.up_expr} on a conditional effect of action "
+                        f"{a.name!r} is not supported: the encoding's caused/3 rule reads an "
+                        "effect's conditions off precondition/3, which is not numeric.")
                 if isinstance(ca, ASPExpr) and ca.up_expr.is_fluent_exp() and ca.value == 'false':
                     self.negated_fluents.add(ca.up_expr._content.payload.name)
                 cond_head = (
                     f"precondition({effect_term}, {str(ca)}, "
                     f"value({str(ca)}, {ca.value}))"
                 )
-                self._postconditions.append(f"{cond_head} :- action({self._head}).")
+                # A quantified variable in the condition is ranged here, so the
+                # effect gets one precondition atom per binding -- which is the
+                # conjunction over the universe a `forall` condition asks for.
+                body = ', '.join([f'action({self._head})'] + list(ca.bindings))
+                self._postconditions.append(f"{cond_head} :- {body}.")
 
     def _disjunction_facts(self, disjunction, index):
         """orGroup/orDisjunct facts for one disjunctive precondition.
@@ -597,25 +755,8 @@ class ASPAction(ASPTerm):
         numval rather than holds; orDisjunctId declares the disjunct itself, so
         a disjunct made only of numeric literals is still enumerated.
         """
-        group = f'or({index})'
-        facts = [f"orGroup({self._head}, {group}) :- action({self._head})."]
-        for disjunct_id, atoms, bindings in disjunction.disjuncts:
-            body = ', '.join([f'action({self._head})'] + list(bindings))
-            facts.append(
-                f"orDisjunctId({self._head}, {group}, {disjunct_id}) :- {body}.")
-            for atom in atoms:
-                if isinstance(atom, ASPNumComparison):
-                    head = (f"orDisjunctNum({self._head}, {group}, {disjunct_id}, "
-                            f"{str(atom)})")
-                elif isinstance(atom, ASPExpr):
-                    head = (f"orDisjunct({self._head}, {group}, {disjunct_id}, "
-                            f"{str(atom)}, value({str(atom)}, {atom.value}))")
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported literal {atom} in a disjunctive condition of action "
-                        f"{self.up_action.name!r}.")
-                facts.append(f"{head} :- {body}.")
-        return facts
+        return _or_facts(disjunction, str(index), owner=self._head,
+                         body_prefix=[f'action({self._head})'])
 
     def __str__(self):
         _sig = [
@@ -756,29 +897,14 @@ class ASPGoalDisjunction(ASPTerm):
 
     def __init__(self, disjunction, index):
         self.disjunction = disjunction
-        self._group = f'or({index})'
+        self._index = index
 
     @property
     def negated_fluent_names(self):
         return self.disjunction.negated_fluent_names
 
     def __str__(self):
-        lines = [f"goalOrGroup({self._group})."]
-        for disjunct_id, atoms, bindings in self.disjunction.disjuncts:
-            heads = [f"goalOrDisjunctId({self._group}, {disjunct_id})"]
-            for atom in atoms:
-                if isinstance(atom, ASPNumComparison):
-                    heads.append(f"goalOrDisjunctNum({self._group}, {disjunct_id}, "
-                                 f"{str(atom)})")
-                elif isinstance(atom, ASPExpr):
-                    heads.append(f"goalOrDisjunct({self._group}, {disjunct_id}, "
-                                 f"{str(atom)}, value({str(atom)}, {atom.value}))")
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported literal {atom} in a disjunctive goal.")
-            lines += [f"{head}." if not bindings
-                      else f"{head} :- {', '.join(bindings)}." for head in heads]
-        return '\n'.join(lines)
+        return '\n'.join(_or_facts(self.disjunction, str(self._index)))
 
 
 class ASPNumGoal(ASPTerm):
