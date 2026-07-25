@@ -231,3 +231,7 @@ node_modules
 sandbox*/
 sandbox*
 dev.py
+
+# Benchmark sweeps: venv, cloned task repositories, generated commands, results
+benchmark-run/
+benchmark-tasks/

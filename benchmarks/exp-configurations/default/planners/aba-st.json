@@ -1,0 +1,16 @@
+{
+    "planner-tag": "ABAPlanner-ST",
+    "up-planner-name": "ABAPlanner",
+    "planner-params": {
+        "max_horizon": 100,
+        "semantics": "ST",
+        "time_scale": 2
+    },
+    "tracks": ["classical"],
+    "comment": [
+        "The ABA backend does not honor `timeout`, so the search is bounded by",
+        "`max_horizon` and the runner's own alarm is what stops it. Its framework",
+        "grows with the square of the largest scaled duration, so it is kept off",
+        "the temporal track here; drop the `tracks` key to include it anyway."
+    ]
+}

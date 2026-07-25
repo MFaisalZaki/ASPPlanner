@@ -8,9 +8,9 @@ A lightweight planner that solves automated planning problems by compiling them 
 - **Plans in your vocabulary**: returned plans reference the actions and objects of the problem you passed in — every internal compilation stage (grounding, type inference, renaming) is mapped back before the plan is handed over.
 - **Multi-shot ASP search**: iterative-deepening over the horizon using clingo's incremental (iclingo-style) interface — each new horizon grounds only one additional step instead of regrounding the whole program.
 - **Numeric planning**: integer-valued fluents with constant-delta `increase`/`decrease`/`assign` effects and linear comparison preconditions (simple numeric planning).
-- **Pre-grounding only where it pays**: gringo grounds the task either way, so a task is pre-ground only when a *reachability* grounder supports its `ProblemKind` — otherwise the whole job goes to clingo on the lifted encoding, which prunes bindings with the same static relations a plain enumerating grounder would have left in.
+- **No pre-grounding**: gringo grounds the task anyway, and the lifted encoding gives it the same static relations to prune with, so the whole job goes to clingo. On the classical domains here that reaches the same program a reachability grounder does, byte for byte.
 - **Temporal planning**: PDDL 2.1 durative actions, encoded as the *happenings* of [SMTPlan](https://github.com/KCL-Planning/SMTPlan) — each durative action splits into its two snap actions, the timesteps carry the happening times, and the remaining-duration and over-all constraints tie the halves back together. Required concurrency works (match-cellar solves), and the result is a UP `TimeTriggeredPlan` checked with `up_time_triggered_validator`.
-- **Minimal preprocessing**: the UP compilers that run before ASP encoding are only the ones the encoding cannot express itself — negative conditions, for instance, are encoded directly rather than compiled into mirror fluents. They are selected automatically per problem, or supplied explicitly via the `compilationlist` argument when you want full control.
+- **No condition compilation**: negative conditions, `forall`, `or` and `exists` are all encoded directly rather than compiled away, so nothing rewrites the task before it reaches clingo — an action with 5 disjunctive preconditions stays one action instead of becoming 1024. Supply `compilationlist` if you want a pipeline of your own anyway.
 - **Built-in validation**: every returned plan is checked against the *original* problem with UP's `sequential_plan_validator` before being handed back.
 - **Two backends**: the default `ASPPlanner` (PLASP-style ASP encoding, solved with clingo) and an optional `ABAPlanner` (STRIPS-to-ABA reduction, solved with [aspforaba](https://bitbucket.org/coreo-group/aspforaba)). Both share the UP front-end (compilation pipeline, map-back, validation) and register as UP engines on import.
 
@@ -90,17 +90,52 @@ Clingo terms are integers, so happenings live on an integer time grid. `time_sca
 
 #### Customizing the compilation pipeline
 
-Before a problem reaches the ASP encoder it is put through a list of UP compilers, kept to the ones the encoding genuinely cannot express — anything clingo can take is left to it:
+Before a problem reaches the ASP encoder it is put through a list of UP compilers — by default, none of them.
 
-| compilation | run? | why |
+**Nothing is compiled away.** Every condition shape is stated in the encoding itself, so all that is left of the pipeline is the grounding decision below:
+
+| shape | how it is encoded |
+|---|---|
+| negative conditions | the encoding is multi-valued, so `value(V, false)` is a value like any other. A mirror fluent per negatively-read one would be pure overhead; the encoder just emits the false initial value for the fluents actually read as false |
+| `forall` | a conjunction over the universe — and `precondition`/`goal` facts are already conjunctive. One rule with the variable left free and `has(_, type(...))` in the body; gringo does the expanding |
+| `or`, `exists` | disjunctions, which conjunctive facts cannot state, so they get their own `orGroup`/`orDisjunct` vocabulary: at least one disjunct has to hold, and a disjunct holds when all of its literals do. An `exists` is the same shape with its disjuncts indexed by the quantified variable's binding |
+
+Staying lifted is the point. An action with *k* disjunctions of 4 literals each — the remover writes out 4<sup>k</sup> copies of it, the encoding writes one group:
+
+| `or` groups | ground actions, native | with the remover | compile, native | with the remover |
+|---|---|---|---|---|
+| 2 | 1 | 16 | 0.01s | 0.01s |
+| 4 | 1 | 256 | 0.02s | 0.20s |
+| 5 | **1** | **1024** | **0.04s** | **7.07s** |
+
+The same holds for `exists` (over 40 objects: 41 ground actions instead of 80) and for `forall` (an action with `(forall (?x) (marked ?x))` and `(forall (?x ?y) (near ?x ?y))` stays at 2 precondition facts whether there are 3 objects or 30, against 3 and 30 for the remover).
+
+What the encoding does *not* take is a disjunction nested inside a disjunct (`or(and(a, or(b, c)), d)`), which would need distribution into DNF; that raises and asks for `up_disjunctive_conditions_remover` back. Everything else — including the De Morgan cases, where `not (a or b)` is a conjunction and `not (forall x φ)` is an `exists` — is handled directly.
+
+And it is not pre-ground. gringo grounds the task either way, and the lifted encoding gives it as much to prune with — action signature rules bind parameters via `has(_, type(...))` and fold static preconditions into the rule body. Scaled up, that reaches the same program the FD reachability grounder does, byte for byte:
+
+| task | ground actions / atoms, lifted | with the grounder |
 |---|---|---|
-| `up_quantifiers_remover` | yes | the fact vocabulary has no term for a quantified variable, so `forall`/`exists` are expanded over the universe first |
-| `up_disjunctive_conditions_remover` | yes | `precondition`/`goal` facts are read conjunctively, so an `or` has to become separate actions. One that reaches the encoder anyway is rejected rather than silently weakened into an `and` |
-| `up_negative_conditions_remover` | **no** | the encoding is multi-valued: `value(V, false)` is a value like any other, so a mirror fluent per negatively-read one would be pure overhead. The encoder just emits the false initial value for the fluents that are actually read as false |
+| gripper, 20 balls | 164 / 36447 | 164 / 36447 |
+| transport, 16 locations | 62 / 5641 | 62 / 5641 |
+| blocksworld, 9 blocks | 180 / 25018 | 180 / 25018 |
 
-Then a grounder — but only one that prunes by **reachability analysis**. That is the whole reason to pre-ground ahead of an ASP encoding: gringo grounds the task anyway, so a grounder that merely enumerates type-consistent bindings does the same work twice and hands gringo a *bigger* program than the lifted encoding would have produced, whose action signature rules bind parameters via `has(_, type(...))` and fold static preconditions into the rule body.
+**The one thing it cannot do is reachability analysis**, which prunes on *dynamic* preconditions where static folding is blind. If an action is narrowed only by a fluent some other action establishes — `use(?x, ?m)` gated by `loaded(?x, ?m)`, where `loaded` only ever holds for compatible pairs — the lifted program is quadratically bigger:
 
-`aspplanners.common.compilation.select_grounder` asks the installed engines which of them supports the task's `ProblemKind`, restricted to `REACHABILITY_GROUNDERS`; if none does, the task goes to clingo whole. In practice classical tasks get Fast Downward's reachability grounder and numeric and temporal ones are solved lifted.
+| items × machines | ground actions, lifted | with the grounder |
+|---|---|---|
+| 4 × 4 | 20 | 8 |
+| 14 × 14 | **210** | **28** |
+
+For a domain shaped like that, ask for it back — that is what `aspplanners.common.compilation.select_grounder` is for:
+
+```python
+from unified_planning.shortcuts import CompilationKind
+from aspplanners.common.compilation import REACHABILITY_GROUNDERS, select_grounder
+
+grounder = select_grounder(problem.kind, REACHABILITY_GROUNDERS)   # None if none applies
+planner = PLASPPlanner(problem, compilationlist=[[grounder, CompilationKind.GROUNDING]])
+```
 
 Pass `compilationlist` to take over that choice. Each entry is a `[engine_name, CompilationKind]` pair applied in order, and the list is used verbatim — the automatic grounder selection is bypassed, so include or omit the grounder yourself:
 
@@ -162,6 +197,17 @@ It runs the same shared front-end (compilation pipeline, map-back, validation) b
 - [aspplanners/lp_io.py](aspplanners/lp_io.py) — generic ASP program I/O (`parse_lp`/`dump_lp` and the `ASPStatement` term family).
 - [aspplanners/up_engines.py](aspplanners/up_engines.py) — both UP engine adapters (`UPPLASPPlanner` and `UPABAPlanner`, registered as the `ASPPlanner` and `ABAPlanner` engines) and their supported `ProblemKind`s.
 - [tests/](tests/) — end-to-end tests (`pip install -e ".[dev]" && pytest`).
+- [benchmarks/](benchmarks/) — the `aspbench` benchmark harness: `setup_benchmark.sh` builds a venv, fetches the classical/numeric/temporal benchmark sets and generates one slurm job per (planner, instance) pair; `aspbench analyze` turns the results into a coverage table. See [benchmarks/README.md](benchmarks/README.md).
+
+## Benchmarking
+
+```bash
+cd benchmarks
+./setup_benchmark.sh          # asks for the per-task time and memory limits, then does the rest
+```
+<!-- ./setup_benchmark.sh --partition compute --qos long --account proj123 --time-limit 30m --memory-limit 8GB --yes -->
+
+It creates a virtualenv, installs ASPPlanner and the harness into it, clones [classical-domains](https://github.com/AI-Planning/classical-domains), [numeric-domains](https://github.com/pyPMT/numeric-domains) and the temporal IPC tracks from [pddl-instances](https://github.com/potassco/pddl-instances), writes the experiment configuration and generates the slurm job arrays; then `bash sandbox/slurm/submit_all.sh` runs the sweep and `aspbench analyze --sandbox-dir sandbox` reports coverage per planner and track. Every prompt has a matching flag, so `./setup_benchmark.sh --time-limit 30m --memory-limit 8GB --tracks temporal --yes` is the same run unattended.
 
 ## License
 

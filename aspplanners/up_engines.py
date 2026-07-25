@@ -31,6 +31,9 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
       - ``max_horizon`` (int, default 1000, bound for the deepening search)
       - ``time_scale``  (int, default 10, resolution of the temporal encoding's
         integer happening times, as a multiple of the durations' gcd)
+      - ``compilationlist`` (list of ``[engine_name, CompilationKind]`` pairs;
+        takes over the automatic selection, see
+        :meth:`PLASPPlanner._check_compilationlist`)
     """
 
     def __init__(self, **options):
@@ -46,10 +49,10 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
     def supported_kind():
         # Classical planning plus SIMPLE numeric planning (integer-valued
         # fluents, constant-delta increase/decrease/assign, linear comparisons).
-        # Quantified/disjunctive/negative conditions are compiled away by the UP
-        # compilers in the encoder pipeline. Reals are accepted because PDDL
-        # (:functions ...) parse as real-typed; the encoder raises on
-        # non-integral constants.
+        # Negative, quantified and disjunctive conditions need no compiling --
+        # the encoding states all of them (see PLASPPlanner._check_compilationlist).
+        # Reals are accepted because PDDL (:functions ...) parse as real-typed;
+        # the encoder raises on non-integral constants.
         from unified_planning.model.problem_kind_versioning import LATEST_PROBLEM_KIND_VERSION
         kind = up.model.ProblemKind(version=LATEST_PROBLEM_KIND_VERSION)
         kind.set_problem_class('ACTION_BASED')
@@ -92,8 +95,10 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         horizon = self.conf.get('horizon')
         max_horizon = self.conf.get('max_horizon', 1000)
         time_scale = int(self.conf.get('time_scale', DEFAULT_TIME_SCALE))
+        compilationlist = self.conf.get('compilationlist')
 
-        planner = PLASPPlanner(problem, encoding, time_scale=time_scale)
+        planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
+                               time_scale=time_scale)
         plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout)
         status = planner.status
         solved = status == PlanGenerationResultStatus.SOLVED_SATISFICING
