@@ -94,7 +94,7 @@ An experiment is a directory, the same shape
 experiment/
 ├── exp-details.json        limits + task selection
 └── planners/
-    ├── asp-seq.json
+    ├── plasp-seq.json
     └── aba-st.json
 ```
 
@@ -127,10 +127,10 @@ experiment/
 ```
 
 ```jsonc
-// planners/asp-seq.json
+// planners/plasp-seq.json
 {
-    "planner-tag": "ASPPlanner-seq",     // names the result directory and the CSV column
-    "up-planner-name": "ASPPlanner",     // the registered UP engine
+    "planner-tag": "PLASPPlanner-seq",     // names the result directory and the CSV column
+    "up-planner-name": "PLASPPlanner",     // the registered UP engine
     "planner-params": {"encoding": "seq", "max_horizon": 1000, "time_scale": 10},
     "tracks": ["classical", "numeric"]   // optional: restrict this planner to some tracks
 }
@@ -144,7 +144,7 @@ automatically when a configuration asks for the `ABAPlanner` engine.
 
 `planner-params` goes to `OneshotPlanner(params=...)` verbatim, so anything the
 engine accepts works: `encoding`, `horizon`, `max_horizon`, `time_scale` and
-`compilationlist` for `ASPPlanner`; `max_horizon`, `semantics` and `time_scale`
+`compilationlist` for `PLASPPlanner`; `max_horizon`, `semantics` and `time_scale`
 for `ABAPlanner`. A `compilationlist` names its `CompilationKind` as a string
 and the runner resolves it, so a configuration can take over the compilation
 pipeline — listing the removers without a grounder, for instance, benchmarks

@@ -218,9 +218,9 @@ def write_default_experiment(exp_dir: str, time_limit: Optional[str] = None,
         handle.write('\n')
 
     starters = {
-        'asp-seq.json': {
-            'planner-tag': 'ASPPlanner-seq',
-            'up-planner-name': 'ASPPlanner',
+        'plasp-seq.json': {
+            'planner-tag': 'PLASPPlanner-seq',
+            'up-planner-name': 'PLASPPlanner',
             'planner-params': {'encoding': 'seq', 'max_horizon': 1000, 'time_scale': 10},
         },
         'aba-st.json': {

@@ -460,7 +460,7 @@ def test_aba_rejects_a_numeric_over_all_condition():
 # UP engine interface
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("engine", ["ASPPlanner", "ABAPlanner"])
+@pytest.mark.parametrize("engine", ["PLASPPlanner", "ABAPlanner"])
 def test_engine_accepts_and_solves_a_temporal_task(engine):
     if engine == "ABAPlanner":
         pytest.importorskip("aspforaba", reason="ABA backend requires the optional `aba` extra")

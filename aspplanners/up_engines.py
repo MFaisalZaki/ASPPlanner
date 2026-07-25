@@ -2,9 +2,9 @@
 
 Two ``OneshotPlanner`` engines are registered on ``import aspplanners``:
 
-  * ``ASPPlanner``  -> :class:`UPPLASPPlanner`, the PLASP/clingo backend
+  * ``PLASPPlanner`` -> :class:`UPPLASPPlanner`, the PLASP/clingo backend
     (:class:`aspplanners.plasp.planner.PLASPPlanner`); the default, numeric-capable.
-  * ``ABAPlanner``  -> :class:`UPABAPlanner`, the STRIPS-to-ABA/aspforaba backend
+  * ``ABAPlanner``   -> :class:`UPABAPlanner`, the STRIPS-to-ABA/aspforaba backend
     (:class:`aspplanners.abaplan.planner.ABAPlan`); optional, needs the ``aba`` extra.
 
 The ABA backend's ``aspforaba`` dependency is imported lazily inside the planner,

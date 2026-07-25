@@ -1,10 +1,10 @@
-# ASPPlanner
+# ASPPlanners
 
-A lightweight planner that solves automated planning problems by compiling them to Answer Set Programming (ASP) and delegating search to [clingo](https://potassco.org/clingo/). ASPPlanner plugs into the [Unified Planning](https://github.com/aiplan4eu/unified-planning) (UP) framework as a `OneshotPlanner` engine, so any UP problem can be solved through a uniform interface.
+A lightweight planner that solves automated planning problems by compiling them to Answer Set Programming (ASP) and delegating search to [clingo](https://potassco.org/clingo/). ASPPlanners plugs into the [Unified Planning](https://github.com/aiplan4eu/unified-planning) (UP) framework as a `OneshotPlanner` engine, so any UP problem can be solved through a uniform interface.
 
 ## Features
 
-- **UP integration**: registers itself as the `ASPPlanner` engine on import, usable through `OneshotPlanner` like any other UP planner. Honors the `timeout` argument and reports proper statuses (`SOLVED_SATISFICING`, `UNSOLVABLE_INCOMPLETELY`, `TIMEOUT`).
+- **UP integration**: registers itself as the `PLASPPlanner` engine on import, usable through `OneshotPlanner` like any other UP planner. Honors the `timeout` argument and reports proper statuses (`SOLVED_SATISFICING`, `UNSOLVABLE_INCOMPLETELY`, `TIMEOUT`).
 - **Plans in your vocabulary**: returned plans reference the actions and objects of the problem you passed in — every internal compilation stage (grounding, type inference, renaming) is mapped back before the plan is handed over.
 - **Multi-shot ASP search**: iterative-deepening over the horizon using clingo's incremental (iclingo-style) interface — each new horizon grounds only one additional step instead of regrounding the whole program.
 - **Numeric planning**: integer-valued fluents with constant-delta `increase`/`decrease`/`assign` effects and linear comparison preconditions (simple numeric planning).
@@ -12,21 +12,21 @@ A lightweight planner that solves automated planning problems by compiling them 
 - **Temporal planning**: PDDL 2.1 durative actions, encoded as the *happenings* of [SMTPlan](https://github.com/KCL-Planning/SMTPlan) — each durative action splits into its two snap actions, the timesteps carry the happening times, and the remaining-duration and over-all constraints tie the halves back together. Required concurrency works (match-cellar solves), and the result is a UP `TimeTriggeredPlan` checked with `up_time_triggered_validator`.
 - **No condition compilation**: negative conditions, `forall`, `or` and `exists` are all encoded directly rather than compiled away, so nothing rewrites the task before it reaches clingo — an action with 5 disjunctive preconditions stays one action instead of becoming 1024. Supply `compilationlist` if you want a pipeline of your own anyway.
 - **Built-in validation**: every returned plan is checked against the *original* problem with UP's `sequential_plan_validator` before being handed back.
-- **Two backends**: the default `ASPPlanner` (PLASP-style ASP encoding, solved with clingo) and an optional `ABAPlanner` (STRIPS-to-ABA reduction, solved with [aspforaba](https://bitbucket.org/coreo-group/aspforaba)). Both share the UP front-end (compilation pipeline, map-back, validation) and register as UP engines on import.
+- **Two backends**: the default `PLASPPlanner` (PLASP-style ASP encoding, solved with clingo) and an optional `ABAPlanner` (STRIPS-to-ABA reduction, solved with [aspforaba](https://bitbucket.org/coreo-group/aspforaba)). Both share the UP front-end (compilation pipeline, map-back, validation) and register as UP engines on import.
 
 ## Installation
 
-ASPPlanner targets Python 3.10+.
+ASPPlanners targets Python 3.10+.
 
 ```bash
-git clone https://github.com/MFaisalZaki/ASPPlanner.git
-cd ASPPlanner
+git clone https://github.com/MFaisalZaki/ASPPlanners.git
+cd ASPPlanners
 pip install -e .
 ```
 
 Runtime dependencies (installed automatically): `clingo>=5.6.0`, `unified-planning>=1.1.0`, `up_fast_downward>=0.5.2`.
 
-The `ABAPlanner` backend additionally needs `aspforaba`; install it with the optional `aba` extra (`pip install -e ".[aba]"`). It is imported lazily, so `import aspplanners` and the default `ASPPlanner` engine work without it.
+The `ABAPlanner` backend additionally needs `aspforaba`; install it with the optional `aba` extra (`pip install -e ".[aba]"`). It is imported lazily, so `import aspplanners` and the default `PLASPPlanner` engine work without it.
 
 ## Usage
 
@@ -35,11 +35,11 @@ The `ABAPlanner` backend additionally needs `aspforaba`; install it with the opt
 Importing `aspplanners` registers the engine, so the standard UP entry points work out of the box:
 
 ```python
-import aspplanners  # registers the ASPPlanner engine
+import aspplanners  # registers the PLASPPlanner engine
 from unified_planning.shortcuts import OneshotPlanner
 
 # `problem` is any unified_planning.model.Problem you constructed or parsed.
-with OneshotPlanner(name="ASPPlanner") as planner:
+with OneshotPlanner(name="PLASPPlanner") as planner:
     result = planner.solve(problem, timeout=60)
     print(result.status)
     print(result.plan)
@@ -47,7 +47,7 @@ with OneshotPlanner(name="ASPPlanner") as planner:
 
 Engine options: `params={"max_horizon": 50}` bounds the deepening search (default 1000), `params={"horizon": 10}` solves at one fixed horizon instead, and `params={"time_scale": 2}` sets the resolution of the temporal encoding (see [Temporal planning](#temporal-planning)).
 
-The optional `ABAPlanner` engine is selected the same way — `OneshotPlanner(name="ABAPlanner")`. Its options are `max_horizon` (default 1000), `semantics` (default `"ST"`, aspforaba's extension semantics) and `time_scale`. Unlike `ASPPlanner`, it does not honor `timeout`, so bound the search with `max_horizon`. It needs the `aba` extra.
+The optional `ABAPlanner` engine is selected the same way — `OneshotPlanner(name="ABAPlanner")`. Its options are `max_horizon` (default 1000), `semantics` (default `"ST"`, aspforaba's extension semantics) and `time_scale`. Unlike `PLASPPlanner`, it does not honor `timeout`, so bound the search with `max_horizon`. It needs the `aba` extra.
 
 ### Direct API
 
@@ -99,6 +99,7 @@ Before a problem reaches the ASP encoder it is put through a list of UP compiler
 | negative conditions | the encoding is multi-valued, so `value(V, false)` is a value like any other. A mirror fluent per negatively-read one would be pure overhead; the encoder just emits the false initial value for the fluents actually read as false |
 | `forall` | a conjunction over the universe — and `precondition`/`goal` facts are already conjunctive. One rule with the variable left free and `has(_, type(...))` in the body; gringo does the expanding |
 | `or`, `exists` | disjunctions, which conjunctive facts cannot state, so they get their own `orGroup`/`orDisjunct` vocabulary: at least one disjunct has to hold, and a disjunct holds when all of its literals do. An `exists` is the same shape with its disjuncts indexed by the quantified variable's binding |
+| numeric comparisons | `<`, `<=`, `=` and their negations against `numval`, wherever a condition can appear: `numPrecondition`, `numGoal`, `numOverall`, and `orDisjunctNum` inside a disjunct. A negation is the comparison's complement (`not (x = y)` is `neq`), not a `not` over a `holds` chain the numeric side does not have |
 
 Staying lifted is the point. An action with *k* disjunctions of 4 literals each — the remover writes out 4<sup>k</sup> copies of it, the encoding writes one group:
 
@@ -187,7 +188,7 @@ print(planner.status)   # PlanGenerationResultStatus of the last call
 print(planner.logs)
 ```
 
-It runs the same shared front-end (compilation pipeline, map-back, validation) but always grounds the problem — the reduction is over ground STRIPS, so unlike `PLASPPlanner` there is no lifted path to hand the task to, and it takes whichever grounder supports the kind rather than only a reachability one — and builds the ABA framework itself, so it takes no `compilationlist` and no `timeout`; bound the deepening search with `max_horizon`. Temporal tasks work here too — `ABAPlan(problem).plan()` solves match-cellar: `run` and the remaining duration become atoms of the framework, "the interval is still open" and "the duration has elapsed" become assumptions attacked by their contraries, and each step's gap is picked by a set of mutually contrary assumptions the same way its action is. Everything is propositional, so the framework grows with the square of the largest scaled duration and the ABA backend is markedly slower than the PLASP one on temporal tasks; lower `time_scale` (or use `ASPPlanner`) if that bites.
+It runs the same shared front-end (compilation pipeline, map-back, validation) but always grounds the problem — the reduction is over ground STRIPS, so unlike `PLASPPlanner` there is no lifted path to hand the task to, and it takes whichever grounder supports the kind rather than only a reachability one — and builds the ABA framework itself, so it takes no `compilationlist` and no `timeout`; bound the deepening search with `max_horizon`. Temporal tasks work here too — `ABAPlan(problem).plan()` solves match-cellar: `run` and the remaining duration become atoms of the framework, "the interval is still open" and "the duration has elapsed" become assumptions attacked by their contraries, and each step's gap is picked by a set of mutually contrary assumptions the same way its action is. Everything is propositional, so the framework grows with the square of the largest scaled duration and the ABA backend is markedly slower than the PLASP one on temporal tasks; lower `time_scale` (or use `PLASPPlanner`) if that bites.
 
 ## Project layout
 
@@ -195,7 +196,7 @@ It runs the same shared front-end (compilation pipeline, map-back, validation) b
 - [aspplanners/abaplan/](aspplanners/abaplan/) — the optional ABA backend: `encoder.py` (`ABAEncoder` — STRIPS-to-ABA framework construction) and `planner.py` (`ABAPlan` — deepening search over aspforaba).
 - [aspplanners/common/](aspplanners/common/) — backend-agnostic front-end shared by both backends: compilation pipeline, plan validation, TIM typing, and `temporal.py` (durative actions → snap actions, and the integer time grid).
 - [aspplanners/lp_io.py](aspplanners/lp_io.py) — generic ASP program I/O (`parse_lp`/`dump_lp` and the `ASPStatement` term family).
-- [aspplanners/up_engines.py](aspplanners/up_engines.py) — both UP engine adapters (`UPPLASPPlanner` and `UPABAPlanner`, registered as the `ASPPlanner` and `ABAPlanner` engines) and their supported `ProblemKind`s.
+- [aspplanners/up_engines.py](aspplanners/up_engines.py) — both UP engine adapters (`UPPLASPPlanner` and `UPABAPlanner`, registered as the `PLASPPlanner` and `ABAPlanner` engines) and their supported `ProblemKind`s.
 - [tests/](tests/) — end-to-end tests (`pip install -e ".[dev]" && pytest`).
 - [benchmarks/](benchmarks/) — the `aspbench` benchmark harness: `setup_benchmark.sh` builds a venv, fetches the classical/numeric/temporal benchmark sets and generates one slurm job per (planner, instance) pair; `aspbench analyze` turns the results into a coverage table. See [benchmarks/README.md](benchmarks/README.md).
 
@@ -205,9 +206,9 @@ It runs the same shared front-end (compilation pipeline, map-back, validation) b
 cd benchmarks
 ./setup_benchmark.sh          # asks for the per-task time and memory limits, then does the rest
 ```
-<!-- ./setup_benchmark.sh --partition compute --qos long --account proj123 --time-limit 30m --memory-limit 8GB --yes -->
+<!-- ./setup_benchmark.sh --partition compute --qos long --time-limit 30m --memory-limit 8GB --yes -->
 
-It creates a virtualenv, installs ASPPlanner and the harness into it, clones [classical-domains](https://github.com/AI-Planning/classical-domains), [numeric-domains](https://github.com/pyPMT/numeric-domains) and the temporal IPC tracks from [pddl-instances](https://github.com/potassco/pddl-instances), writes the experiment configuration and generates the slurm job arrays; then `bash sandbox/slurm/submit_all.sh` runs the sweep and `aspbench analyze --sandbox-dir sandbox` reports coverage per planner and track. Every prompt has a matching flag, so `./setup_benchmark.sh --time-limit 30m --memory-limit 8GB --tracks temporal --yes` is the same run unattended.
+It creates a virtualenv, installs ASPPlanners and the harness into it, clones [classical-domains](https://github.com/AI-Planning/classical-domains), [numeric-domains](https://github.com/pyPMT/numeric-domains) and the temporal IPC tracks from [pddl-instances](https://github.com/potassco/pddl-instances), writes the experiment configuration and generates the slurm job arrays; then `bash sandbox/slurm/submit_all.sh` runs the sweep and `aspbench analyze --sandbox-dir sandbox` reports coverage per planner and track. Every prompt has a matching flag, so `./setup_benchmark.sh --time-limit 30m --memory-limit 8GB --tracks temporal --yes` is the same run unattended.
 
 ## License
 

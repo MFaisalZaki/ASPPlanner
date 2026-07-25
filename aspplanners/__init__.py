@@ -8,5 +8,5 @@ import unified_planning as up
 from aspplanners.up_engines import UPPLASPPlanner, UPABAPlanner  # noqa: F401
 
 env = up.environment.get_environment()
-env.factory.add_engine('ASPPlanner', 'aspplanners.up_engines', 'UPPLASPPlanner')
+env.factory.add_engine('PLASPPlanner', 'aspplanners.up_engines', 'UPPLASPPlanner')
 env.factory.add_engine('ABAPlanner', 'aspplanners.up_engines', 'UPABAPlanner')

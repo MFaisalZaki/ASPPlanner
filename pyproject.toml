@@ -66,9 +66,9 @@ docs = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/MFaisalZaki/ASPPlanner"
-Repository = "https://github.com/MFaisalZaki/ASPPlanner"
-Issues = "https://github.com/MFaisalZaki/ASPPlanner/issues"
+Homepage = "https://github.com/MFaisalZaki/ASPPlanners"
+Repository = "https://github.com/MFaisalZaki/ASPPlanners"
+Issues = "https://github.com/MFaisalZaki/ASPPlanners/issues"
 
 
 [tool.setuptools.packages.find]
