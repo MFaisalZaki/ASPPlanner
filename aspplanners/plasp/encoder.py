@@ -44,6 +44,10 @@ from aspplanners.plasp.facts import (
     ASPGoalState,
     ASPNumGoal,
     is_numeric_comparison,
+    parseexpr,
+    flatten_atoms,
+    ASPDisjunction,
+    ASPGoalDisjunction,
 )
 
 
@@ -164,10 +168,15 @@ class PLASPEncoder:
         map_backs.append(grounded_map_back)
 
         # step two check if we can infer types for untyped problems. TIM works
-        # on instantaneous actions only, and a temporal task has been grounded
-        # by this point anyway, so there are no parameter types left to infer.
+        # on instantaneous actions over quantifier-free conditions: a temporal
+        # task has been grounded by this point anyway, so there are no parameter
+        # types left to infer, and a `forall` the encoding keeps (rather than
+        # compiling away) has a variable TIM's expression rebuilder has no case
+        # for. Skipping it just means the task stays with its one type.
         temporal = problem.kind.has_continuous_time()
-        if len(new_problem.user_types) == 1 and not temporal:
+        quantified = new_problem.kind.has_universal_conditions() \
+            or new_problem.kind.has_existential_conditions()
+        if len(new_problem.user_types) == 1 and not temporal and not quantified:
             tim_result = TIMTypeInferenceCompiler().compile(new_problem)
             new_problem = tim_result.problem
             map_backs.append(tim_result.map_back_action_instance)
@@ -216,6 +225,9 @@ class PLASPEncoder:
             if asp_actions else set()
         negated_fluents |= {g.fluent_name for g in goal_terms
                             if isinstance(g, ASPGoalState) and g.value == 'false'}
+        negated_fluents |= set().union(*(g.negated_fluent_names for g in goal_terms
+                                         if isinstance(g, ASPGoalDisjunction))) \
+            if any(isinstance(g, ASPGoalDisjunction) for g in goal_terms) else set()
 
         initial_state = set(
             ASPInitialState(fluent, value) for fluent, value in new_problem.initial_values.items()
@@ -324,13 +336,16 @@ class PLASPEncoder:
         for g in goal_predicates:
             # Numeric comparison goals (e.g. `battery >= 1`) are checked against
             # numval at the goal step, like numeric preconditions; everything
-            # else is a boolean/object state goal on a grounded fluent.
+            # else is a boolean/object state goal, parsed the same way a
+            # precondition is so that negation and `forall` behave identically.
             if is_numeric_comparison(g):
                 ret_goals.append(ASPNumGoal(g))
                 continue
-            _is_true = g.node_type != OperatorKind.NOT
-            value = str(_is_true).lower()
-            ret_goals.append(ASPGoalState(g if _is_true else g.args[0], value))
+            for atom in flatten_atoms(parseexpr(g)):
+                if isinstance(atom, ASPDisjunction):
+                    ret_goals.append(ASPGoalDisjunction(atom, len(ret_goals)))
+                else:
+                    ret_goals.append(ASPGoalState(atom))
         return ret_goals
     
     def _initialize_fluents(self, task:Problem):

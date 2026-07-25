@@ -214,8 +214,21 @@ class TIMTypeInferenceCompiler(Engine):
             # in a position). Leave the problem untyped.
             return CompilerResult(problem, lambda ai: ai, self.name)
 
-        new_problem = self._infer_and_build_from_reachability(
-            problem, grounded_problem)
+        try:
+            new_problem = self._infer_and_build_from_reachability(
+                problem, grounded_problem)
+        except Exception as e:
+            # Inference is an optimisation -- narrower types let the encoding's
+            # has(_, type(...)) bindings prune more -- never a correctness
+            # requirement, so a partitioning that will not rebuild into a
+            # well-formed problem is dropped rather than raised. A task with
+            # nothing reachable is the case that hits this: every object lands
+            # in an empty property space, and the fluents rebuilt from it no
+            # longer accept the parameters of the actions that read them.
+            _LOGGER.info(
+                "Type inference did not produce a usable typing (%s: %s); leaving "
+                "the problem untyped.", type(e).__name__, e)
+            return CompilerResult(problem, lambda ai: ai, self.name)
 
         original_actions = {a.name: a for a in problem.actions}
         original_objects = {o.name: o for o in problem.all_objects}
