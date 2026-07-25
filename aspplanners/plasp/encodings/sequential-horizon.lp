@@ -28,6 +28,10 @@
 #defined numPrecondition/4.
 #defined numEffect/3.
 #defined numAssign/3.
+#defined orGroup/2.
+#defined orDisjunct/5.
+#defined goalOrGroup/1.
+#defined goalOrDisjunct/4.
 
 #show occurs/2.
 
@@ -54,6 +58,18 @@ numval(V, X, 0) :- holds(V, value(V, X), 0), numVariable(V).
 
 % Check preconditions
 :- occurs(Action, t), precondition(Action, Variable, Value), not holds(Variable, Value, t - 1).
+
+% Disjunctive preconditions. precondition/3 facts are read conjunctively, which
+% is what lets a `forall` be emitted as one rule with its variable ranged by the
+% grounder. A disjunction cannot be stated that way, so it gets its own
+% vocabulary: an action carries one orGroup/2 per disjunctive condition, each
+% holding orDisjunct/5 literals grouped by disjunct. At least one disjunct has
+% to hold, and a disjunct holds when every literal in it does. An `exists` is
+% the same thing with the disjuncts indexed by the quantified variable's
+% binding, so the grounder enumerates them.
+orDisjunctFails(A, G, D, t) :- orDisjunct(A, G, D, Variable, Value), not holds(Variable, Value, t - 1).
+orGroupHolds(A, G, t) :- orDisjunct(A, G, D, _, _), not orDisjunctFails(A, G, D, t).
+:- occurs(A, t), orGroup(A, G), not orGroupHolds(A, G, t).
 
 % Numeric preconditions: linear comparisons of value(V)+C sides at t-1.
 :- occurs(A, t), numPrecondition(A, lt, expr(V1, C1), expr(V2, C2)), numval(V1, X1, t - 1), numval(V2, X2, t - 1), X1 + C1 >= X2 + C2.
@@ -85,6 +101,12 @@ numval(V, X, t) :- holds(V, value(V, X), t), numVariable(V).
 #external query(t).
 
 :- query(t), goal(Variable, Value), not holds(Variable, Value, t).
+
+% Disjunctive goals, read exactly as disjunctive preconditions are but against
+% the state at the goal step rather than the one before the action.
+goalDisjunctFails(G, D, t) :- goalOrDisjunct(G, D, Variable, Value), not holds(Variable, Value, t).
+goalOrGroupHolds(G, t) :- goalOrDisjunct(G, D, _, _), not goalDisjunctFails(G, D, t).
+:- query(t), goalOrGroup(G), not goalOrGroupHolds(G, t).
 
 % Numeric goals: linear comparisons of value(V)+C sides at the goal step,
 % evaluated against numval(_, _, t) exactly as numeric preconditions are at t-1.

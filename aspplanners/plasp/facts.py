@@ -28,6 +28,73 @@ def _is_numeric_fnode(f):
     return (f.is_int_constant() or f.is_real_constant() or f.is_plus() or f.is_minus()
             or (f.is_fluent_exp() and not f.type.is_bool_type()))
 
+def flatten_atoms(parsed):
+    """`parseexpr`'s result as a flat list; nested lists are conjunctions."""
+    atoms = parsed if isinstance(parsed, list) else [parsed]
+    while any(isinstance(a, list) for a in atoms):
+        atoms = [e for a in atoms for e in (a if isinstance(a, list) else [a])]
+    return atoms
+
+
+class ASPDisjunction:
+    """A disjunctive condition: at least one of its disjuncts has to hold.
+
+    Not an :class:`~aspplanners.lp_io.ASPTerm`, because it has no rendering of
+    its own -- it is emitted as ``orGroup``/``orDisjunct`` facts by whoever owns
+    the condition, which is the only place the action or goal it belongs to is
+    known (see :class:`ASPAction`).
+
+    Each disjunct is ``(id_term, atoms, bindings)``: `atoms` all have to hold for
+    that disjunct to, and `bindings` are the ``has(_, type(...))`` atoms its rule
+    body needs. An ``or`` numbers its disjuncts 0, 1, ...; an ``exists`` is the
+    same structure with the disjuncts indexed by the quantified variable's
+    binding, so the grounder enumerates them instead of a compiler.
+    """
+
+    def __init__(self, disjuncts):
+        self.disjuncts = disjuncts
+
+    @property
+    def negated_fluent_names(self):
+        return {atom.up_expr._content.payload.name
+                for _id, atoms, _bindings in self.disjuncts for atom in atoms
+                if atom.value == 'false'}
+
+
+def _quantified_bindings(f):
+    """``(disjunct id term, has(...) bindings)`` for a quantifier's variables."""
+    variables = list(f.variables())
+    names = [QUANTIFIED_PREFIX + asp_name(v.name).upper() for v in variables]
+    bindings = [f'has({name}, {str(ASPType(v.type))})' for name, v in zip(names, variables)]
+    return (names[0] if len(names) == 1 else f"({','.join(names)})"), bindings
+
+
+def _as_disjuncts(f, t, index):
+    """The disjuncts one argument of a disjunction contributes.
+
+    A conjunctive argument is one disjunct numbered `index`; an ``exists`` is a
+    family of them indexed by its variables' bindings, which is what lets an
+    `or` and an `exists` share a vocabulary.
+    """
+    quantified = f.is_exists() if t != 'false' else f.is_forall()
+    if quantified:
+        disjunct_id, bindings = _quantified_bindings(f)
+        atoms = flatten_atoms(parseexpr(f.arg(0), t))
+        _reject_nested(f, atoms)
+        return [(f"({index},{disjunct_id})", atoms, bindings)]
+    atoms = flatten_atoms(parseexpr(f, t))
+    _reject_nested(f, atoms)
+    return [(str(index), atoms, sorted({b for a in atoms for b in a.bindings}))]
+
+
+def _reject_nested(f, atoms):
+    if any(isinstance(a, ASPDisjunction) for a in atoms):
+        raise NotImplementedError(
+            f"Disjunct {f} is itself disjunctive; the encoding states a disjunction as a "
+            "flat set of conjunctive disjuncts, so nesting one inside another needs "
+            "up_disjunctive_conditions_remover in the compilation pipeline.")
+
+
 def parseexpr(f, t=None):
     """!
     given a FNode from UP representing a fluent and a possible timestep return a
@@ -40,19 +107,26 @@ def parseexpr(f, t=None):
         return ASPExpr(f, str(f).lower())
     if f.is_not():
         return parseexpr(f.args[0], 'false')
-    # A conjunction is what the encoding's precondition/goal facts *are*: every
-    # one of them has to hold. A disjunction is not expressible that way, so it
-    # only survives where De Morgan turns it into one -- `not (a or b)` is
-    # `not a and not b`. The other two shapes would quietly become conjunctions
-    # and lose plans, so they are rejected rather than encoded wrongly.
     negated = t == 'false'
+    # A conjunction is what precondition/goal facts *are*, so it just flattens --
+    # and so does a `forall`, which is a conjunction over the universe, emitted
+    # with its variable left free for the grounder to range (see _arg_term).
+    # De Morgan swaps which is which under negation.
     if f.is_and() if not negated else f.is_or():
         return [parseexpr(arg, t) for arg in f.args]
-    if f.is_and() or f.is_or():
-        raise NotImplementedError(
-            f"{'Negated conjunction' if negated else 'Disjunction'} {f} cannot be encoded "
-            "as plasp precondition/goal facts, which are conjunctive. Keep "
-            "up_disjunctive_conditions_remover in the compilation pipeline.")
+    if f.is_forall() if not negated else f.is_exists():
+        return parseexpr(f.arg(0), t)
+    # A disjunction is not conjunctive, so it becomes an ASPDisjunction that the
+    # owning action or goal emits as its own orGroup/orDisjunct facts. An
+    # `exists` is one too, with the disjuncts indexed by its variables.
+    if f.is_or() or f.is_and():
+        return ASPDisjunction([d for i, arg in enumerate(f.args)
+                               for d in _as_disjuncts(arg, t, i)])
+    if f.is_exists() or f.is_forall():
+        disjunct_id, bindings = _quantified_bindings(f)
+        atoms = flatten_atoms(parseexpr(f.arg(0), t))
+        _reject_nested(f, atoms)
+        return ASPDisjunction([(disjunct_id, atoms, bindings)])
     if f.is_lt() or f.is_le():
         cmp = ASPNumComparison(f, 'lt' if f.is_lt() else 'le')
         return cmp.negated() if t == 'false' else cmp
@@ -137,14 +211,26 @@ def _equality_value_term(arg):
         return asp_name(arg.parameter().name).upper()
     raise TypeError(f"Unsupported equality term: {arg} of type {type(arg)}")
 
+# Prefix for the ASP variable a *quantified* variable renders as, keeping it
+# clear of an action parameter that happens to share its name.
+QUANTIFIED_PREFIX = 'Q_'
+
+
 def _arg_term(arg):
-    # Returns (term_str, asp_type, needs_has_binding). Objects become
-    # `constant("name")` ground terms; parameters become uppercase ASP
-    # variables that must be bound by `has(_, type(...))` in the rule body.
+    # Returns (term_str, asp_type, kind). Objects become `constant("name")`
+    # ground terms. Parameters become uppercase ASP variables, already bound by
+    # the action's signature rule. A quantified variable becomes one too, but
+    # nothing binds it yet, so whoever emits the rule has to add the
+    # `has(_, type(...))` atom that ranges it over the universe -- which is how
+    # a `forall` gets expanded, by the grounder rather than by a compiler.
     if arg.is_object_exp():
-        return (f'constant("{asp_name(arg.object().name)}")', ASPType(arg.type), False)
+        return (f'constant("{asp_name(arg.object().name)}")', ASPType(arg.type), 'object')
     if arg.is_parameter_exp():
-        return (asp_name(arg.parameter().name).upper(), ASPType(arg.type), True)
+        return (asp_name(arg.parameter().name).upper(), ASPType(arg.type), 'parameter')
+    if arg.is_variable_exp():
+        variable = arg.variable()
+        return (QUANTIFIED_PREFIX + asp_name(variable.name).upper(),
+                ASPType(variable.type), 'quantified')
     raise TypeError(f"Unsupported fluent argument: {arg} of type {type(arg)}")
 
 def _int_value(f):
@@ -271,6 +357,11 @@ class ASPExpr(ASPTerm):
         head_args = ','.join(t for t, _, _ in terms)
         self._head = f"\"{name}\",{head_args}" if head_args else f"\"{name}\""
         self.value = value
+        # `has(_, type(...))` atoms for the quantified variables in this
+        # expression, which the rule emitting it has to carry in its body:
+        # ranging them over the universe there is what expands the `forall`.
+        self.bindings = [f'has({term}, {str(asp_type)})'
+                         for term, asp_type, kind in terms if kind == 'quantified']
 
     def __str__(self):
         return f"variable(({self._head}))"
@@ -369,13 +460,16 @@ class ASPAction(ASPTerm):
         self._preconditions = []
         equality_atoms = []
         static_atoms = []
+        group_index = 0
         for precondition in a.preconditions:
-            variablelist = parseexpr(precondition)
-            variablelist = [variablelist] if not isinstance(variablelist, list) else variablelist
             # And-within-And nesting yields nested lists — flatten them.
-            while any(isinstance(v, list) for v in variablelist):
-                variablelist = [e for v in variablelist for e in (v if isinstance(v, list) else [v])]
+            variablelist = flatten_atoms(parseexpr(precondition))
             for variable in variablelist:
+                if isinstance(variable, ASPDisjunction):
+                    self._preconditions += self._disjunction_facts(variable, group_index)
+                    self.negated_fluents |= variable.negated_fluent_names
+                    group_index += 1
+                    continue
                 if isinstance(variable, ASPEquality):
                     equality_atoms.append(str(variable))
                     continue
@@ -390,14 +484,18 @@ class ASPAction(ASPTerm):
                 # to fold via initialState/2; closed-world handling for
                 # `not initialState(...)` is non-trivial so we leave
                 # negative cases on the runtime path.
-                if (fluent_name in static_fluents) and variable.value == 'true':
+                bindings = getattr(variable, 'bindings', [])
+                if (fluent_name in static_fluents) and variable.value == 'true' and not bindings:
                     static_atoms.append(f'initialState({str(variable)}, value({str(variable)}, true))')
                     continue
                 head = f'precondition({self._head}, {str(variable)}, value({str(variable)}, {variable.value}))'
                 # action(...) ground-restricts every parameter via the action signature rule;
                 # adding has(_, type(...)) per parameter forces the grounder to iterate
-                # |objects|^arity body matches per rule with no semantic effect.
-                self._preconditions.append(f"{head} :- action({self._head}).")
+                # |objects|^arity body matches per rule with no semantic effect. A
+                # *quantified* variable is the exception: nothing else binds it, and
+                # ranging it over the universe here is what expands the forall.
+                body = ', '.join([f'action({self._head})'] + bindings)
+                self._preconditions.append(f"{head} :- {body}.")
 
         extra_body = equality_atoms + static_atoms
         if extra_body:
@@ -421,7 +519,10 @@ class ASPAction(ASPTerm):
             variable = parseexpr(eff.fluent)
             value    = str(eff.value).lower()
             head = f"postcondition({self._head}, effect(unconditional), {str(variable)}, value({str(variable)}, {value}))"
-            self._postconditions.append(f"{head} :- action({self._head}).")
+            # `forall ?x . f(?x) := v` needs ?x ranged the same way a forall
+            # condition does; the caused/3 rule then fires once per binding.
+            body = ', '.join([f'action({self._head})'] + list(variable.bindings))
+            self._postconditions.append(f"{head} :- {body}.")
         for term, delta in num_deltas.items():
             if delta == 0:
                 continue
@@ -470,6 +571,27 @@ class ASPAction(ASPTerm):
                     f"value({str(ca)}, {ca.value}))"
                 )
                 self._postconditions.append(f"{cond_head} :- action({self._head}).")
+
+    def _disjunction_facts(self, disjunction, index):
+        """orGroup/orDisjunct facts for one disjunctive precondition.
+
+        The group is a plain fact of the action; each disjunct contributes one
+        orDisjunct per literal, under whatever bindings that disjunct needs --
+        which for an `exists` is what ranges it over the universe.
+        """
+        group = f'or({index})'
+        facts = [f"orGroup({self._head}, {group}) :- action({self._head})."]
+        for disjunct_id, atoms, bindings in disjunction.disjuncts:
+            body = ', '.join([f'action({self._head})'] + list(bindings))
+            for atom in atoms:
+                if not isinstance(atom, ASPExpr):
+                    raise NotImplementedError(
+                        f"Unsupported literal {atom} in a disjunctive condition of action "
+                        f"{self.up_action.name!r}.")
+                head = (f"orDisjunct({self._head}, {group}, {disjunct_id}, "
+                        f"{str(atom)}, value({str(atom)}, {atom.value}))")
+                facts.append(f"{head} :- {body}.")
+        return facts
 
     def __str__(self):
         _sig = [
@@ -574,13 +696,60 @@ class ASPInitialState(ASPStateVarVal):
         return f"initialState({super().__str__()})."
 
 
-class ASPGoalState(ASPStateVarVal):
+class ASPGoalState(ASPTerm):
+    """``goal(V, value(V, val))`` for one state goal.
+
+    Built from a parsed :class:`ASPExpr` rather than a ground fluent, so a
+    ``forall`` goal works the same way a ``forall`` precondition does: the
+    quantified variable stays free in the head and its ``has(_, type(...))``
+    binding goes in the body, leaving the expansion to the grounder.
+    """
+
+    def __init__(self, expr):
+        if not isinstance(expr, ASPExpr):
+            raise NotImplementedError(
+                f"Unsupported state goal: {expr} of type {type(expr).__name__}.")
+        self.expr = expr
+        self.value = expr.value
+        self.bindings = list(expr.bindings)
+
     @property
     def fluent_name(self):
-        return self.fluent.up_fluent.fluent().name
+        return self.expr.up_expr._content.payload.name
 
     def __str__(self):
-        return f"goal({super().__str__()})."
+        head = f"goal({str(self.expr)}, value({str(self.expr)}, {self.value}))"
+        return f"{head}." if not self.bindings else f"{head} :- {', '.join(self.bindings)}."
+
+
+class ASPGoalDisjunction(ASPTerm):
+    """goalOrGroup/goalOrDisjunct facts for one disjunctive goal.
+
+    The goal-time analogue of the orGroup/orDisjunct facts :class:`ASPAction`
+    emits: same structure, checked against the state at the goal step rather
+    than the one before an action.
+    """
+
+    def __init__(self, disjunction, index):
+        self.disjunction = disjunction
+        self._group = f'or({index})'
+
+    @property
+    def negated_fluent_names(self):
+        return self.disjunction.negated_fluent_names
+
+    def __str__(self):
+        lines = [f"goalOrGroup({self._group})."]
+        for disjunct_id, atoms, bindings in self.disjunction.disjuncts:
+            for atom in atoms:
+                if not isinstance(atom, ASPExpr):
+                    raise NotImplementedError(
+                        f"Unsupported literal {atom} in a disjunctive goal.")
+                head = (f"goalOrDisjunct({self._group}, {disjunct_id}, "
+                        f"{str(atom)}, value({str(atom)}, {atom.value}))")
+                lines.append(f"{head}." if not bindings
+                             else f"{head} :- {', '.join(bindings)}.")
+        return '\n'.join(lines)
 
 
 class ASPNumGoal(ASPTerm):

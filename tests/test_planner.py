@@ -413,27 +413,36 @@ def test_the_grounder_is_the_one_that_supports_the_task():
     assert select_grounder(classical.kind, candidates=()) is None
 
 
-def test_only_a_reachability_grounder_runs_ahead_of_the_encoding():
-    """Pre-grounding only pays when the grounder prunes by reachability: gringo
-    grounds the task anyway, and the lifted encoding gives it more to prune with
-    than a plain enumerating grounder would. So a task no reachability grounder
-    takes is handed to clingo whole."""
+def test_the_task_reaches_clingo_uncompiled():
+    """The default pipeline is empty: nothing rewrites the task, and it is not
+    pre-ground either -- gringo grounds it anyway, and the lifted encoding gives
+    it the same static relations to prune with."""
+    for problem in (robot_line_problem(), robot_line_problem(connected_line=False),
+                    numeric_counter_problem()):
+        assert PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None) == []
+
+
+def test_a_reachability_grounder_can_still_be_asked_for():
+    """Reachability analysis is the one thing the lifted encoding cannot do --
+    it prunes on *dynamic* preconditions, which static folding cannot see. That
+    is what select_grounder stays for; passing it back has to keep working."""
+    from unified_planning.shortcuts import CompilationKind
+
     from aspplanners.common.compilation import REACHABILITY_GROUNDERS, select_grounder
 
-    numeric = numeric_counter_problem()
-    assert select_grounder(numeric.kind, REACHABILITY_GROUNDERS) is None
-    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(numeric, None)
-    assert not any("grounder" in name for name, _kind in pipeline)
+    problem = robot_line_problem()
+    grounder = select_grounder(problem.kind, REACHABILITY_GROUNDERS)
+    assert grounder == "fast-downward-reachability-grounder"
 
-    classical = robot_line_problem()
-    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(classical, None)
-    assert pipeline[-1][0] == "fast-downward-reachability-grounder"
-    assert pipeline[-1][0] in REACHABILITY_GROUNDERS
+    planner = PLASPPlanner(problem, compilationlist=[[grounder, CompilationKind.GROUNDING]])
+    plan = planner.plan(max_horizon=6)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert len(plan.actions) == 3
+    assert_plan_is_over_original_problem(problem, plan)
 
+    # A numeric task has no reachability grounder that takes it.
+    assert select_grounder(numeric_counter_problem().kind, REACHABILITY_GROUNDERS) is None
 
-# ---------------------------------------------------------------------------
-# What still has to be compiled away, and what does not
-# ---------------------------------------------------------------------------
 
 def negative_precondition_problem():
     """`advance` needs NOT blocked, which already holds. `ready` is there so the
@@ -482,17 +491,16 @@ def test_only_negatively_read_fluents_get_a_false_initial_value():
     assert not any("go" in line for line in initial), initial
 
 
-def test_a_disjunction_reaching_the_encoder_is_rejected_not_weakened():
-    """precondition/goal facts are read conjunctively, so an `or` that survives
-    the pipeline would quietly become an `and` and lose plans. The default
-    pipeline still removes them; bypassing that has to fail loudly."""
-    from unified_planning.shortcuts import CompilationKind, Fluent, Or
+def disjunction_problem(disjuncts=None):
+    """`finish` needs `Or(*disjuncts)`; `set_b` is the only thing that makes a
+    literal true. Defaults to `a or b`, solvable in two steps."""
+    from unified_planning.shortcuts import Fluent, Or
 
     a, b, done = Fluent("a"), Fluent("b"), Fluent("done")
     set_b = InstantaneousAction("set_b")
     set_b.add_effect(b, True)
     finish = InstantaneousAction("finish")
-    finish.add_precondition(Or(a, b))
+    finish.add_precondition(Or(a, b) if disjuncts is None else Or(*disjuncts(a, b)))
     finish.add_effect(done, True)
 
     problem = Problem("disjunction")
@@ -501,12 +509,264 @@ def test_a_disjunction_reaching_the_encoder_is_rejected_not_weakened():
     problem.add_action(set_b)
     problem.add_action(finish)
     problem.add_goal(done)
+    return problem
 
+
+def test_a_disjunction_is_encoded_not_compiled_away():
+    """precondition facts are conjunctive, so a disjunction gets its own
+    orGroup/orDisjunct vocabulary instead of splitting the action in two."""
+    problem = disjunction_problem()
     pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None)
-    assert any("disjunctive" in name for name, _kind in pipeline)
-    planner = PLASPPlanner(problem)
-    assert len(planner.plan(max_horizon=4).actions) == 2
+    assert not any("disjunctive" in name for name, _kind in pipeline)
 
-    without = [entry for entry in pipeline if "disjunctive" not in entry[0]]
-    with pytest.raises(NotImplementedError, match="conjunctive"):
-        PLASPPlanner(problem, compilationlist=without)
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["set_b", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+    facts = planner.compiled_task.fact_lines
+    assert any(line.startswith("orGroup(") for line in facts), sorted(facts)
+    # One group, two disjuncts -- not two copies of `finish`.
+    assert len({line for line in facts if line.startswith("orGroup(")}) == 1
+    assert len({line for line in facts if line.startswith("action(action(")}) == 2
+
+
+def test_a_disjunct_is_still_read_conjunctively():
+    """`or(and(a, b), c)`: the first disjunct needs BOTH a and b. Getting only
+    `a` must not satisfy it -- that is the failure mode a flat list of literals,
+    with the conjunction lost, would have."""
+    from unified_planning.shortcuts import And, Fluent, Or
+
+    def build(with_set_b):
+        a, b, c, done = Fluent("a"), Fluent("b"), Fluent("c"), Fluent("done")
+        set_a = InstantaneousAction("set_a")
+        set_a.add_effect(a, True)
+        finish = InstantaneousAction("finish")
+        finish.add_precondition(Or(And(a, b), c))
+        finish.add_effect(done, True)
+
+        problem = Problem("conjunctive_disjunct")
+        for fluent in (a, b, c, done):
+            problem.add_fluent(fluent, default_initial_value=False)
+        problem.add_action(set_a)
+        if with_set_b:
+            set_b = InstantaneousAction("set_b")
+            set_b.add_effect(b, True)
+            problem.add_action(set_b)
+        problem.add_action(finish)
+        problem.add_goal(done)
+        return problem
+
+    # `c` is unreachable and only `a` can be established, so the and-disjunct
+    # stays half-satisfied and there is no plan.
+    planner = PLASPPlanner(build(with_set_b=False))
+    planner.plan(max_horizon=5)
+    assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, planner.logs
+
+    # Add the missing half and the same disjunct becomes satisfiable.
+    problem = build(with_set_b=True)
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=5)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert len(plan.actions) == 3
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_disjunctive_goal_is_encoded_too():
+    from unified_planning.shortcuts import Fluent, Or
+
+    a, b = Fluent("a"), Fluent("b")
+    set_b = InstantaneousAction("set_b")
+    set_b.add_effect(b, True)
+    problem = Problem("disjunctive_goal")
+    for fluent in (a, b):
+        problem.add_fluent(fluent, default_initial_value=False)
+    problem.add_action(set_b)
+    problem.add_goal(Or(a, b))
+
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["set_b"]
+    assert any(line.startswith("goalOrGroup(")
+               for line in planner.compiled_task.fact_lines)
+
+
+# ---------------------------------------------------------------------------
+# Quantifiers
+# ---------------------------------------------------------------------------
+
+def forall_problem(n_objects=3, universal_effect=False):
+    """`finish` needs every thing marked. With `universal_effect`, one `sweep`
+    marks them all at once and the goal is the forall instead."""
+    from unified_planning.shortcuts import BoolType, Fluent, Forall, Object, UserType, Variable
+
+    Thing = UserType("Thing")
+    marked = Fluent("marked", BoolType(), t=Thing)
+    done = Fluent("done")
+    x = Variable("x", Thing)
+
+    problem = Problem("forall")
+    problem.add_fluent(marked, default_initial_value=False)
+    problem.add_fluent(done, default_initial_value=False)
+    problem.add_objects([Object(f"o{i}", Thing) for i in range(1, n_objects + 1)])
+
+    if universal_effect:
+        sweep = InstantaneousAction("sweep")
+        sweep.add_effect(marked(x), True, forall=[x])
+        problem.add_action(sweep)
+        problem.add_goal(Forall(marked(x), x))
+        return problem, 1
+
+    mark = InstantaneousAction("mark", t=Thing)
+    mark.add_effect(marked(mark.parameter("t")), True)
+    finish = InstantaneousAction("finish")
+    finish.add_precondition(Forall(marked(x), x))
+    finish.add_effect(done, True)
+    problem.add_action(mark)
+    problem.add_action(finish)
+    problem.add_goal(done)
+    return problem, n_objects + 1
+
+
+@pytest.mark.parametrize("universal_effect", [False, True], ids=["condition", "effect"])
+def test_forall_is_expanded_by_the_grounder_not_by_a_compiler(universal_effect):
+    """A `forall` is a conjunction over the universe, and precondition/goal
+    facts are already conjunctive: emit one with its variable free and let
+    gringo range it. So the quantifier remover does not have to run."""
+    problem, expected_length = forall_problem(universal_effect=universal_effect)
+    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None)
+    assert not any("quantifiers" in name for name, _kind in pipeline)
+
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=8)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert len(plan.actions) == expected_length
+    assert_plan_is_over_original_problem(problem, plan)
+
+    # One rule, ranged by has/2 -- not one fact per object.
+    quantified = [line for line in planner.compiled_task.fact_lines if "Q_X" in line]
+    assert quantified, sorted(planner.compiled_task.fact_lines)
+    for line in quantified:
+        assert 'has(Q_X, type("Thing"))' in line, line
+
+
+def test_forall_stays_one_rule_however_big_the_universe_is():
+    sizes = {}
+    for n in (3, 12):
+        planner = PLASPPlanner(forall_problem(n_objects=n)[0])
+        sizes[n] = sum(1 for line in planner.compiled_task.facts["_actions"]
+                       if line.startswith("precondition("))
+    assert sizes[3] == sizes[12] == 1, sizes
+
+
+def test_exists_is_encoded_as_disjuncts_indexed_by_binding():
+    """An `exists` is a disjunction over the universe, so it reuses the same
+    orGroup/orDisjunct vocabulary -- one rule whose disjunct id is the quantified
+    variable, enumerated by the grounder instead of copied per object by a
+    compiler."""
+    from unified_planning.shortcuts import BoolType, Exists, Fluent, Object, UserType, Variable
+
+    def build(n_objects):
+        Thing = UserType("Thing")
+        seen, done = Fluent("seen", BoolType(), t=Thing), Fluent("done")
+        x = Variable("x", Thing)
+        look = InstantaneousAction("look", t=Thing)
+        look.add_effect(seen(look.parameter("t")), True)
+        finish = InstantaneousAction("finish")
+        finish.add_precondition(Exists(seen(x), x))
+        finish.add_effect(done, True)
+
+        problem = Problem("exists")
+        problem.add_fluent(seen, default_initial_value=False)
+        problem.add_fluent(done, default_initial_value=False)
+        problem.add_objects([Object(f"o{i}", Thing) for i in range(1, n_objects + 1)])
+        problem.add_action(look)
+        problem.add_action(finish)
+        problem.add_goal(done)
+        return problem
+
+    problem = build(3)
+    pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None)
+    assert not any("quantifiers" in name for name, _kind in pipeline)
+
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=6)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["look", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+    disjuncts = [line for line in planner.compiled_task.fact_lines
+                 if line.startswith("orDisjunct(")]
+    assert len(disjuncts) == 1, disjuncts
+    assert "Q_X" in disjuncts[0] and 'has(Q_X, type("Thing"))' in disjuncts[0]
+
+    # And it stays one rule however many objects there are.
+    for n in (3, 15):
+        facts = PLASPPlanner(build(n)).compiled_task.fact_lines
+        assert len([l for l in facts if l.startswith("orDisjunct(")]) == 1
+
+
+def test_an_exists_that_can_never_hold_is_unsolvable():
+    """The or-group has a disjunct per binding and none of them can hold, so
+    nothing satisfies the group -- the encoding must not treat an empty-ish
+    disjunction as vacuously true."""
+    from unified_planning.shortcuts import BoolType, Exists, Fluent, Object, UserType, Variable
+
+    Thing = UserType("Thing")
+    seen, done = Fluent("seen", BoolType(), t=Thing), Fluent("done")
+    x = Variable("x", Thing)
+    finish = InstantaneousAction("finish")
+    finish.add_precondition(Exists(seen(x), x))
+    finish.add_effect(done, True)
+
+    problem = Problem("exists_unreachable")
+    problem.add_fluent(seen, default_initial_value=False)
+    problem.add_fluent(done, default_initial_value=False)
+    problem.add_objects([Object(f"o{i}", Thing) for i in range(1, 4)])
+    problem.add_action(finish)
+    problem.add_goal(done)
+
+    planner = PLASPPlanner(problem)
+    planner.plan(max_horizon=4)
+    assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, planner.logs
+
+
+def test_the_default_pipeline_compiles_nothing_away():
+    """Everything the encoding needs, it states itself; all that is left of the
+    pipeline is the grounding decision."""
+    for problem in (robot_line_problem(), numeric_counter_problem(),
+                    disjunction_problem(), forall_problem()[0]):
+        pipeline = PLASPPlanner.__new__(PLASPPlanner)._check_compilationlist(problem, None)
+        assert all("grounder" in name for name, _kind in pipeline), pipeline
+
+
+def test_a_disjunction_nested_inside_a_disjunct_is_rejected():
+    """`or(and(a, or(b, c)), d)` needs distribution into DNF before it is a flat
+    set of conjunctive disjuncts, which is the one shape the encoding does not
+    take -- so it says so instead of getting it wrong."""
+    from unified_planning.shortcuts import And, Fluent, Or
+
+    a, b, c, d, done = (Fluent(name) for name in ("a", "b", "c", "d", "done"))
+    finish = InstantaneousAction("finish")
+    finish.add_precondition(Or(And(a, Or(b, c)), d))
+    finish.add_effect(done, True)
+
+    problem = Problem("nested_disjunction")
+    for fluent in (a, b, c, d):
+        problem.add_fluent(fluent, default_initial_value=True)
+    problem.add_fluent(done, default_initial_value=False)
+    problem.add_action(finish)
+    problem.add_goal(done)
+
+    with pytest.raises(NotImplementedError, match="itself disjunctive"):
+        PLASPPlanner(problem)
+
+    # ...and putting the remover back is exactly what the message asks for.
+    from unified_planning.shortcuts import CompilationKind
+
+    planner = PLASPPlanner(problem, compilationlist=[
+        ["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING],
+    ])
+    assert len(planner.plan(max_horizon=3).actions) == 1

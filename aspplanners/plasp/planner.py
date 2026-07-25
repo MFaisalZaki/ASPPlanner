@@ -7,13 +7,11 @@ import clingo
 
 from unified_planning.engines import PlanGenerationResultStatus
 from unified_planning.plans import SequentialPlan, TimeTriggeredPlan, ActionInstance
-from unified_planning.shortcuts import CompilationKind
 
 from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
-from aspplanners.common.compilation import REACHABILITY_GROUNDERS, select_grounder
 from aspplanners.common.validation import validate_plan
 
 _ENCODINGS_DIR = os.path.join(os.path.dirname(__file__), 'encodings')
@@ -53,40 +51,38 @@ class PLASPPlanner:
         self.status: Optional[PlanGenerationResultStatus] = None
 
     def _check_compilationlist(self, problem, compilationlist: Optional[List[List[str]]]) -> List[List[str]]:
+        """The UP compilers to run before encoding: by default, none."""
         if compilationlist is not None:
             return compilationlist
 
-        # Only the compilations the encoding genuinely cannot express are run;
-        # anything the solver can take is left to it.
-        #   - quantifiers: the fact vocabulary has no term for a quantified
-        #     variable, so forall/exists are expanded over the universe here.
-        #   - disjunctions: precondition/goal facts are read conjunctively, so
-        #     an `or` is split into separate actions here (facts.parseexpr
-        #     rejects one that survives rather than silently weakening it).
-        #   - negative conditions are NOT removed: the encoding is multi-valued
-        #     and tracks `value(V, false)` as a first-class value, so a mirror
-        #     fluent per negatively-read one would be pure overhead.
-        retlsit = [
-            ["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING],
-            ["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING],
-        ]
-
-        # Pre-grounding only earns its place when the grounder prunes by
-        # reachability; gringo grounds the task either way, and the lifted
-        # encoding gives it more to prune with than a plain enumerating grounder
-        # would (action signature rules bind parameters via has(_, type(...))
-        # and fold static preconditions into the body). So: use a reachability
-        # grounder when one supports the task, and otherwise hand the whole job
-        # to clingo. Numeric and temporal tasks land on the lifted path that
-        # way, which is where they were headed anyway.
+        # Empty: the task goes to clingo as it stands.
+        #
+        # Nothing needs compiling away, because the encoding states all of it --
+        # negative conditions (it is multi-valued, so `value(V, false)` is a
+        # value like any other), `forall` (a conjunction over the universe,
+        # emitted with its variable free for the grounder to range), and `or` /
+        # `exists` (an orGroup/orDisjunct pair, the latter with its disjuncts
+        # indexed by the quantified variable's binding).
+        #
+        # Nor is the task pre-ground. gringo grounds it either way, and the
+        # lifted encoding gives it as much to prune with: action signature rules
+        # bind parameters via has(_, type(...)) and fold static preconditions
+        # into the rule body. On the shipped classical domains that reaches the
+        # same program a reachability grounder does, byte for byte, for a
+        # quarter of the build time.
+        #
+        # The exception is an action narrowed *only* by a dynamic precondition
+        # -- `use(?x, ?m)` gated by `loaded(?x, ?m)`, where `loaded` is only ever
+        # established for some pairs. Static folding cannot see that; reachability
+        # analysis can, and the lifted program is quadratically bigger. For a
+        # domain shaped like that, pass a compilationlist ending in
+        #   [select_grounder(problem.kind, REACHABILITY_GROUNDERS), CompilationKind.GROUNDING]
+        # (which is what common.compilation.select_grounder is there for).
         #
         # PDDL (:functions ...) parse as real-typed fluents; the fact builders
         # accept them as long as every constant is integral (clingo terms are
         # integers) and raise otherwise.
-        grounder = select_grounder(problem.kind, REACHABILITY_GROUNDERS)
-        if grounder is None:
-            return retlsit
-        return retlsit + [[grounder, CompilationKind.GROUNDING]]
+        return []
 
     def validate(self, plan) -> Tuple[bool, Optional[str]]:
         """Validate a plan against the original problem with UP's sequential
