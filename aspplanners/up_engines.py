@@ -17,6 +17,7 @@ import unified_planning as up
 from unified_planning.engines import PlanGenerationResult, PlanGenerationResultStatus
 from unified_planning.engines.results import LogMessage, LogLevel
 
+from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.planner import PLASPPlanner
 from aspplanners.abaplan.planner import ABAPlan
 
@@ -28,6 +29,8 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
       - ``encoding``    (str, default ``"seq"``)
       - ``horizon``     (int, solve at one fixed horizon)
       - ``max_horizon`` (int, default 1000, bound for the deepening search)
+      - ``time_scale``  (int, default 10, resolution of the temporal encoding's
+        integer happening times, as a multiple of the durations' gcd)
     """
 
     def __init__(self, **options):
@@ -64,6 +67,17 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_effects_kind('CONDITIONAL_EFFECTS')
         kind.set_effects_kind('INCREASE_EFFECTS')
         kind.set_effects_kind('DECREASE_EFFECTS')
+        # Temporal planning over the PDDL 2.1 durative-action fragment, encoded
+        # as SMTPlan's happenings (see encodings/sequential-horizon.lp). Left
+        # out on purpose: SELF_OVERLAPPING (a durative action may not overlap
+        # itself), INTERMEDIATE_CONDITIONS_AND_EFFECTS (conditions and effects
+        # sit at the two snap actions only), TIMED_EFFECTS/TIMED_GOALS, and
+        # PROCESSES/EVENTS (PDDL+ continuous change).
+        kind.set_time('CONTINUOUS_TIME')
+        kind.set_time('DURATION_INEQUALITIES')
+        kind.set_expression_duration('INT_TYPE_DURATIONS')
+        kind.set_expression_duration('REAL_TYPE_DURATIONS')
+        kind.set_expression_duration('STATIC_FLUENTS_IN_DURATIONS')
         return kind
 
     @staticmethod
@@ -77,8 +91,9 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         encoding = self.conf.get('encoding', 'seq')
         horizon = self.conf.get('horizon')
         max_horizon = self.conf.get('max_horizon', 1000)
+        time_scale = int(self.conf.get('time_scale', DEFAULT_TIME_SCALE))
 
-        planner = PLASPPlanner(problem, encoding)
+        planner = PLASPPlanner(problem, encoding, time_scale=time_scale)
         plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout)
         status = planner.status
         solved = status == PlanGenerationResultStatus.SOLVED_SATISFICING
@@ -95,6 +110,8 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
     Recognised options:
       - ``max_horizon`` (int, default 1000)
       - ``semantics``   (str, default ``"ST"``)
+      - ``time_scale``  (int, default 10, resolution of the temporal encoding's
+        integer happening times, as a multiple of the durations' gcd)
     """
 
     def __init__(self, **options):
@@ -112,7 +129,11 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         # with increase/decrease/assign effects and linear comparisons, via
         # finite-domain propositionalisation). Quantified/disjunctive/negative
         # conditions are compiled away by the UP compilers in the pipeline.
-        # Conditional effects are NOT supported by the ABA encoding.
+        # Conditional effects are NOT supported by the ABA encoding, and neither
+        # are numeric over-all conditions (the reduction turns an over-all
+        # condition into a static test on the actions that could break it, which
+        # only exists for boolean ones) -- ProblemKind has no feature for that
+        # distinction, so it is raised at encoding time instead.
         kind = up.model.ProblemKind()
         kind.set_problem_class("ACTION_BASED")
         kind.set_problem_type("SIMPLE_NUMERIC_PLANNING")
@@ -128,6 +149,13 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_conditions_kind("UNIVERSAL_CONDITIONS")
         kind.set_effects_kind("INCREASE_EFFECTS")
         kind.set_effects_kind("DECREASE_EFFECTS")
+        # Temporal planning over the same PDDL 2.1 durative-action fragment the
+        # PLASP backend covers; see UPPLASPPlanner.supported_kind.
+        kind.set_time("CONTINUOUS_TIME")
+        kind.set_time("DURATION_INEQUALITIES")
+        kind.set_expression_duration("INT_TYPE_DURATIONS")
+        kind.set_expression_duration("REAL_TYPE_DURATIONS")
+        kind.set_expression_duration("STATIC_FLUENTS_IN_DURATIONS")
         return kind
 
     @staticmethod
@@ -140,8 +168,9 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
                output_stream: Optional[IO[str]] = None) -> "up.engines.PlanGenerationResult":
         max_horizon = int(self.conf.get("max_horizon", 1000))
         semantics = self.conf.get("semantics", "ST")
+        time_scale = int(self.conf.get("time_scale", DEFAULT_TIME_SCALE))
 
-        planner = ABAPlan(problem)
+        planner = ABAPlan(problem, time_scale=time_scale)
         plan = planner.plan(max_horizon=max_horizon, semantics=semantics)
         status = planner.status
         solved = status == PlanGenerationResultStatus.SOLVED_SATISFICING

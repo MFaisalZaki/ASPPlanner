@@ -1,6 +1,7 @@
 """The PLASP encoder: compiles a UP Problem into ASP facts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from fractions import Fraction
 from itertools import chain
 
 from unified_planning.engines.compilers.utils import replace_action
@@ -10,15 +11,23 @@ from unified_planning.shortcuts import EffectKind
 from unified_planning.model import (
     Problem,
     Action,
+    DurativeAction,
 )
 
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 from functools import partial
 
 from unified_planning.plans import ActionInstance
 
 from aspplanners.common.tim_typer import TIMTypeInferenceCompiler
 from aspplanners.common.compilation import compose_map_backs, run_compilers
+from aspplanners.common.temporal import (
+    DEFAULT_TIME_SCALE,
+    add_effect as _add_effect,
+    all_effects as _all_effects,
+    effect_groups as _effect_groups,
+    split_durative_actions,
+)
 
 from aspplanners.plasp.facts import (
     asp_name,
@@ -29,6 +38,7 @@ from aspplanners.plasp.facts import (
     ASPFluent,
     ASPNumFluent,
     ASPAction,
+    ASPDurativeAction,
     ASPInitialState,
     ASPGoalState,
     ASPNumGoal,
@@ -36,12 +46,17 @@ from aspplanners.plasp.facts import (
 )
 
 
-def _check_asp_name_collisions(problem: Problem) -> None:
+def _check_asp_name_collisions(problem: Problem, action_names) -> None:
     """The ASP rendering maps '-' to '_' (see asp_facts.asp_name); two UP
     names that only differ there would become indistinguishable in the model
-    atoms, so fail loudly before encoding."""
+    atoms, so fail loudly before encoding.
+
+    `action_names` is passed in rather than read off the problem because a
+    temporal task encodes the *snap* actions the durative ones were split into,
+    whose names have to be checked instead.
+    """
     groups = (
-        ('action', (a.name for a in problem.actions)),
+        ('action', action_names),
         ('object', (o.name for o in problem.all_objects)),
         ('fluent', (f.name for f in problem.fluents)),
         ('type',   (t.name for t in problem.user_types)),
@@ -65,10 +80,22 @@ class ASPEncodingResult:
     ASP model's atoms refer to. `facts` holds the ASP fact lines grouped by
     kind; `map_back_action_instance` lifts a plan step on `problem` back to
     the user's original problem.
+
+    On a temporal task the model's actions are the *snap* actions the durative
+    ones were split into, which are not actions of `problem`: `snap_actions`
+    maps each one back to the durative action it is half of, and `time_unit` is
+    the real duration of one of the encoding's integer time units, so a
+    happening's absolute time is `time_unit` times its scaled time.
     """
     problem: Problem
     facts: Dict[str, Set[str]]
     map_back_action_instance: Callable[[ActionInstance], Optional[ActionInstance]]
+    snap_actions: Dict[str, Tuple[str, str]] = field(default_factory=dict)
+    time_unit: Fraction = Fraction(1)
+    # Whether plans for this task are schedules. Not simply `snap_actions != {}`:
+    # a task can be temporal and still have every durative action pruned as
+    # unreachable, and its plans are still validated as schedules.
+    is_temporal: bool = False
 
     @property
     def fact_lines(self) -> Set[str]:
@@ -107,6 +134,11 @@ class PLASPEncoder:
 
     name = "plaspencoder"
 
+    def __init__(self, time_scale: int = DEFAULT_TIME_SCALE):
+        if time_scale < 1:
+            raise ValueError(f"time_scale must be a positive integer, got {time_scale!r}")
+        self.time_scale = time_scale
+
     def compile(self, problem: Problem, compilationlist: List[List[str]]) -> ASPEncodingResult:
         assert isinstance(problem, Problem)
 
@@ -130,16 +162,26 @@ class PLASPEncoder:
         new_problem, grounded_map_back = run_compilers(new_problem, compilationlist)
         map_backs.append(grounded_map_back)
 
-        # step two check if we can infer types for untyped problems.
-        if len(new_problem.user_types) == 1:
+        # step two check if we can infer types for untyped problems. TIM works
+        # on instantaneous actions only, and a temporal task has been grounded
+        # by this point anyway, so there are no parameter types left to infer.
+        temporal = problem.kind.has_continuous_time()
+        if len(new_problem.user_types) == 1 and not temporal:
             tim_result = TIMTypeInferenceCompiler().compile(new_problem)
             new_problem = tim_result.problem
             map_backs.append(tim_result.map_back_action_instance)
 
+        # step three split every durative action into its two snap actions, the
+        # PDDL 2.1 decomposition SMTPlan's happening encoder is built on. The
+        # snaps carry the at-start/at-end halves and are encoded as ordinary
+        # actions; `durative_facts` re-couples them (see ASPDurativeAction).
+        time_unit, durative_facts, snap_actions, asp_actions = \
+            self._split_durative_actions(new_problem)
+
         # Names are sanitized ('-' -> '_') at fact-rendering time by
         # asp_facts.asp_name and mapped back the same way during plan
         # extraction; make sure that mapping is injective for this task.
-        _check_asp_name_collisions(new_problem)
+        _check_asp_name_collisions(new_problem, [a.name for a in asp_actions])
 
         # A fluent is "static" iff no action ever lists it in its effects.
         # Folding positive preconditions on such fluents into the action
@@ -147,7 +189,7 @@ class PLASPEncoder:
         # by the static relation (see ASPAction docstring).
         modified_fluent_names = set()
         for a in new_problem.actions:
-            for eff in a.effects:
+            for eff in _all_effects(a):
                 modified_fluent_names.add(eff.fluent._content.payload.name)
         static_fluent_names = {f.name for f in new_problem.fluents if f.name not in modified_fluent_names}
 
@@ -169,53 +211,83 @@ class PLASPEncoder:
             '_has':            _render_facts(ASPHasConstant(obj) for obj in new_problem.all_objects),
             '_variables':      _render_facts(ASPFluent(fluent) for fluent in new_problem.fluents),
             '_num_variables':  _render_facts(ASPNumFluent(fluent) for fluent in new_problem.fluents if fluent.type.is_int_type() or fluent.type.is_real_type()),
-            '_actions':        _render_facts(ASPAction(action, static_fluent_names) for action in new_problem.actions),
+            '_actions':        _render_facts(ASPAction(action, static_fluent_names) for action in asp_actions),
             '_initial_state':  _render_facts(initial_state),
             '_goal_state':     _render_facts(chain.from_iterable(self._generate_asp_goal_state(g) for g in new_problem.goals)),
+            '_durative':       _render_facts(durative_facts),
+            '_time':           {'minSeparation(1).'} if durative_facts else set(),
         }
 
         return ASPEncodingResult(
             problem=new_problem,
             facts=facts,
             map_back_action_instance=compose_map_backs(map_backs),
+            snap_actions=snap_actions,
+            time_unit=time_unit,
+            is_temporal=temporal or bool(snap_actions),
         )
-    
+
+    # ------------------------------------------------------------------
+    # Temporal: durative actions -> snap actions + temporal facts
+    # ------------------------------------------------------------------
+
+    def _split_durative_actions(self, problem: Problem):
+        """Decompose every durative action into its two snap actions.
+
+        Returns ``(time_unit, durative_facts, snap_actions, asp_actions)``: the
+        real duration of one integer time unit, the ASPDurativeAction builders
+        coupling each pair of snaps, a map from snap action name to
+        ``(durative action name, 'start'|'end')`` for plan extraction, and the
+        full list of actions to render as ASPAction facts.
+        """
+        unit, decompositions = split_durative_actions(problem, self.time_scale)
+        asp_actions = [a for a in problem.actions if not isinstance(a, DurativeAction)]
+        durative_facts, snap_actions = [], {}
+        for snap in decompositions:
+            asp_actions += [snap.start, snap.end]
+            snap_actions[asp_name(snap.start.name)] = (snap.action.name, 'start')
+            snap_actions[asp_name(snap.end.name)] = (snap.action.name, 'end')
+            durative_facts.append(ASPDurativeAction(
+                snap.action, snap.start.name, snap.end.name, snap.duration, snap.overall))
+        return unit, durative_facts, snap_actions, asp_actions
+
     def _remove_delete_then_set(self, dirty_action: Action) -> Action:
         """!
         Removes delete-then-set effects from the list of effects.
         @param effects: list of effects
         @return list of effects without delete-then-set effects
+
+        A durative action is cleaned per timing: an add and a delete of the same
+        fluent only race when they happen at the same endpoint.
         """
 
-        def has_positive_effect(fluent, action) -> bool:
-            """ Does the action has an effect that assigns the fluent to true? """
-            for eff in action.effects:
+        def has_positive_effect(fluent, effects) -> bool:
+            """ Does the group have an effect that assigns the fluent to true? """
+            for eff in effects:
                 if eff.kind == EffectKind.ASSIGN and eff.fluent == fluent and eff.value.is_true():
                     return True
             return False
 
-        clean_effects = []
-        for eff in dirty_action.effects:
-        # we avoid adding the effect if it is a delete effect and the action has also an add effect for the same fluent
-            if eff.fluent.type.is_bool_type(): # only check boolean fluents
-                if eff.kind == EffectKind.ASSIGN and \
-                    eff.value.is_false() and \
-                    has_positive_effect(eff.fluent, dirty_action):
-                    pass
-                else: 
-                    clean_effects.append(eff)
-            else: 
-                clean_effects.append(eff)
+        def clean(effects):
+            kept = []
+            for eff in effects:
+            # we avoid adding the effect if it is a delete effect and the group has also an add effect for the same fluent
+                if eff.fluent.type.is_bool_type(): # only check boolean fluents
+                    if eff.kind == EffectKind.ASSIGN and \
+                        eff.value.is_false() and \
+                        has_positive_effect(eff.fluent, effects):
+                        pass
+                    else:
+                        kept.append(eff)
+                else:
+                    kept.append(eff)
+            return kept
 
         fixed_action = dirty_action.clone() # we copy the old action
         fixed_action.clear_effects()        # and remove all the effects
-        for eff in clean_effects:           # now we copy over only the good effects
-            if eff.kind == EffectKind.ASSIGN:
-                fixed_action.add_effect(eff.fluent, eff.value, eff.condition, forall=eff.forall)
-            if eff.kind == EffectKind.DECREASE:
-                fixed_action.add_decrease_effect(eff.fluent, eff.value, eff.condition, forall=eff.forall)
-            if eff.kind == EffectKind.INCREASE:
-                fixed_action.add_increase_effect(eff.fluent, eff.value, eff.condition, forall=eff.forall)
+        for timing, effects in _effect_groups(dirty_action):
+            for eff in clean(effects):      # now we copy over only the good effects
+                _add_effect(fixed_action, eff, timing)
         return fixed_action
 
     def _generate_asp_goal_state(self, goal_state):

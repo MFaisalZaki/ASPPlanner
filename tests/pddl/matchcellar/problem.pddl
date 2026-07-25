@@ -1,0 +1,5 @@
+(define (problem mend-one-fuse)
+  (:domain matchcellar)
+  (:objects m1 m2 - match f1 - fuse)
+  (:init (handfree) (unused m1) (unused m2))
+  (:goal (and (mended f1))))

@@ -1,13 +1,15 @@
 import os
 import time
+from fractions import Fraction
 from typing import List, Optional, Tuple
 
 import clingo
 
 from unified_planning.engines import PlanGenerationResultStatus
-from unified_planning.plans import SequentialPlan, ActionInstance
+from unified_planning.plans import SequentialPlan, TimeTriggeredPlan, ActionInstance
 from unified_planning.shortcuts import CompilationKind
 
+from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.facts import asp_name
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
@@ -31,13 +33,14 @@ class PLASPPlanner:
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.
     """
 
-    def __init__(self, problem, encoder_type='seq', compilationlist: Optional[List[List[str]]] = None):
+    def __init__(self, problem, encoder_type='seq', compilationlist: Optional[List[List[str]]] = None,
+                 time_scale: int = DEFAULT_TIME_SCALE):
         if encoder_type not in ENCODERS:
             raise ValueError(
                 f"Unsupported encoder type: {encoder_type!r}; available: {sorted(ENCODERS)}")
         encoder_cls, self.encoding_path = ENCODERS[encoder_type]
         self.problem       = problem
-        self.compiled_task = encoder_cls().compile(problem, self._check_compilationlist(problem, compilationlist))
+        self.compiled_task = encoder_cls(time_scale=time_scale).compile(problem, self._check_compilationlist(problem, compilationlist))
         self.task          = self.compiled_task.problem
         # The task facts never change across horizons: build the string once.
         self.task_facts    = '\n'.join(sorted(self.compiled_task.fact_lines))
@@ -60,18 +63,25 @@ class PLASPPlanner:
         
         if compilationlist is not None:
             return compilationlist
-        
+
         kind = problem.kind
         numeric = kind.has_int_fluents() or kind.has_real_fluents()
+        # Temporal tasks are pre-grounded with UP's own grounder: the FD
+        # reachability grounder rejects durative actions, and the encoder's
+        # snap-action split wants ground durations (`(= ?duration (dist ?a ?b))`
+        # only becomes a number once the parameters are bound).
+        temporal = kind.has_continuous_time()
         retlsit = []
         if compilationlist is None:
             retlsit += [["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING]]
             retlsit += [["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING]]
             retlsit += [["up_disjunctive_conditions_remover", CompilationKind.DISJUNCTIVE_CONDITIONS_REMOVING]]
 
-        if not numeric:
+        if temporal:
+            retlsit += [["up_grounder", CompilationKind.GROUNDING]]
+        elif not numeric:
             retlsit += [["fast-downward-reachability-grounder", CompilationKind.GROUNDING]]
-        
+
         return retlsit
 
     def validate(self, plan) -> Tuple[bool, Optional[str]]:
@@ -112,7 +122,11 @@ class PLASPPlanner:
             with open(destination, 'w') as f:
                 f.write(program)
 
-    def plan(self, horizon=None, max_horizon=1000, timeout=None) -> SequentialPlan:
+    def _empty_plan(self):
+        """The "no plan" value, of whichever plan class this task produces."""
+        return TimeTriggeredPlan([]) if self.compiled_task.is_temporal else SequentialPlan([])
+
+    def plan(self, horizon=None, max_horizon=1000, timeout=None):
         """Iterative-deepening search over horizons 0..max_horizon, or a single
         solve at `horizon` when given.
 
@@ -120,11 +134,13 @@ class PLASPPlanner:
         new step(t)/check(t) parts per horizon instead of regrounding the whole
         program each iteration.
 
-        Returns the plan mapped back onto the original problem; the empty plan
-        means "no plan found" (check `self.status` to distinguish an
-        unsatisfiable/timed-out search from a goal that is trivially reached),
-        except when the goal already holds in the initial state, in which case
-        the empty plan IS the solution and `self.status` is SOLVED_SATISFICING.
+        Returns the plan mapped back onto the original problem -- a
+        `SequentialPlan`, or a `TimeTriggeredPlan` when the task has durative
+        actions. The empty plan means "no plan found" (check `self.status` to
+        distinguish an unsatisfiable/timed-out search from a goal that is
+        trivially reached), except when the goal already holds in the initial
+        state, in which case the empty plan IS the solution and `self.status`
+        is SOLVED_SATISFICING.
         """
         deadline = time.monotonic() + timeout if timeout is not None else None
 
@@ -141,7 +157,7 @@ class PLASPPlanner:
             if outcome == 'unsat':
                 self.status = PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
                 self.logs.append(f'No plan exists at the fixed horizon {horizon}.')
-                return SequentialPlan([])
+                return self._empty_plan()
             return self._conclude(outcome, symbols, horizon)
 
         ctl.ground([('base', []), ('check', [clingo.Number(0)])])
@@ -160,7 +176,7 @@ class PLASPPlanner:
         self.status = PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
         self.logs.append(
             f'No plan found up to horizon {max_horizon} (the task may be solvable with a longer horizon).')
-        return SequentialPlan([])
+        return self._empty_plan()
 
     # ------------------------------------------------------------------
     # Solving
@@ -189,19 +205,19 @@ class PLASPPlanner:
             return 'sat', models[-1]
         return 'unsat', None
 
-    def _conclude(self, outcome, symbols, horizon) -> SequentialPlan:
+    def _conclude(self, outcome, symbols, horizon):
         """Turn a non-unsat solve outcome into a plan + status."""
         if outcome == 'timeout':
             self.status = PlanGenerationResultStatus.TIMEOUT
             self.logs.append(f'Timed out while solving horizon {horizon}.')
-            return SequentialPlan([])
+            return self._empty_plan()
 
         _plan = self._extract_plan(symbols)
         is_valid, reason = self.validate(_plan)
         if not is_valid:
             self.status = PlanGenerationResultStatus.INTERNAL_ERROR
             self.logs.append(f'Plan validation failed: {reason}')
-            return SequentialPlan([])
+            return self._empty_plan()
         self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
         return _plan
 
@@ -209,13 +225,64 @@ class PLASPPlanner:
     # Plan extraction
     # ------------------------------------------------------------------
 
-    def _extract_plan(self, symbols) -> SequentialPlan:
+    def _extract_plan(self, symbols):
         """Build a plan from the model's occurs/2 atoms and lift it back onto
-        the original problem via the compiler pipeline's composed map-back."""
+        the original problem via the compiler pipeline's composed map-back.
+
+        A temporal task yields a `TimeTriggeredPlan`, everything else a
+        `SequentialPlan`.
+        """
+        if self.compiled_task.is_temporal:
+            return self._extract_time_triggered_plan(symbols)
         occurs = sorted((s for s in symbols if s.match('occurs', 2)),
                         key=lambda s: s.arguments[1].number)
         steps = [self._construct_action(self._action_tuple(s)) for s in occurs]
         _plan = SequentialPlan(steps)
+        return _plan.replace_action_instances(self.compiled_task.map_back_action_instance)
+
+    def _extract_time_triggered_plan(self, symbols) -> TimeTriggeredPlan:
+        """Read a schedule off the model's occurs/2 and delta/2 atoms.
+
+        Happening t sits at scaled time delta(1) + ... + delta(t) -- the
+        encoding leaves the absolute times implicit and reports only the gaps.
+        One snap action fires per happening, and a durative action may not
+        overlap itself, so its start is closed by the next end of the same
+        action; the pair becomes one entry with the elapsed time as duration.
+        Scaled times are multiplied by the encoding's time unit to land back on
+        the task's own time scale.
+        """
+        unit = self.compiled_task.time_unit
+        snaps = self.compiled_task.snap_actions
+        gaps = {s.arguments[0].number: s.arguments[1].number
+                for s in symbols if s.match('delta', 2)}
+        clock, happening_time = 0, {}
+        for step in sorted(gaps):
+            clock += gaps[step]
+            happening_time[step] = clock
+
+        steps, open_starts = [], {}
+        for symbol in sorted((s for s in symbols if s.match('occurs', 2)),
+                             key=lambda s: s.arguments[1].number):
+            action_tuple = self._action_tuple(symbol)
+            at = Fraction(happening_time.get(symbol.arguments[1].number, 0)) * unit
+            snap = snaps.get(action_tuple[0])
+            if snap is None:
+                steps.append([at, self._construct_action(action_tuple), None])
+                continue
+            durative_name, half = snap
+            key = (durative_name, action_tuple[1:])
+            if half == 'start':
+                open_starts[key] = len(steps)
+                steps.append([at, self._construct_action(action_tuple), None])
+            else:
+                start = steps[open_starts.pop(key)]
+                start[2] = at - start[0]
+        if open_starts:
+            raise ValueError(
+                f"The ASP model leaves {sorted(k[0] for k in open_starts)} running at the "
+                "horizon; the encoding's goal test should have ruled that out.")
+
+        _plan = TimeTriggeredPlan([tuple(step) for step in steps])
         return _plan.replace_action_instances(self.compiled_task.map_back_action_instance)
 
     @staticmethod
@@ -242,6 +309,11 @@ class PLASPPlanner:
 
     def _construct_action(self, action_tuple) -> ActionInstance:
         name, *arg_names = action_tuple
+        # A snap action is not an action of the compiled task: it is half of the
+        # durative action the plan step really is.
+        snap = self.compiled_task.snap_actions.get(name)
+        if snap is not None:
+            name = asp_name(snap[0])
         up_action = self._actions_by_asp_name.get(name)
         if up_action is None:
             raise ValueError(f"Action {name!r} from the ASP model not found in the compiled task.")

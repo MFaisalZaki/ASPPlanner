@@ -17,20 +17,34 @@ by a constant): coupling several fluents (``f + g``, ``increase(f, g)``) would
 enumerate the product of their domains, which propositionalises far too
 expensively, so those are rejected. The PLASP backend handles such expressions
 with native ``#sum`` arithmetic instead.
+
+Temporal planning over PDDL 2.1 durative actions is supported the same way, and
+is the ABA counterpart of the temporal layer of
+``aspplanners/plasp/encodings/sequential-horizon.lp``: a step is a *happening*,
+a durative action is the pair of snap actions it decomposes into
+(:mod:`aspplanners.common.temporal`), and SMTPlan's ``run`` and ``dur``
+variables become the ``run_...`` and ``rem_...`` atoms below -- the latter
+propositionalised over the same integer time grid, one ``dlt_...`` assumption
+per step choosing the gap to the next happening. Boolean over-all conditions are
+enforced by forbidding, while the interval is open, any action that would delete
+them; numeric over-all conditions have no such static test and are rejected.
 """
 
 from collections import defaultdict
+from fractions import Fraction
 from itertools import product
 
+from unified_planning.model import DurativeAction
 from unified_planning.shortcuts import CompilationKind, EffectKind
 
 from aspplanners.common.compilation import run_compilers
+from aspplanners.common.temporal import DEFAULT_TIME_SCALE, split_durative_actions
 
 
 # UP compilers run before the reduction. The grounder differs by task: the FD
-# reachability grounder prunes classical tasks well but rejects numeric ones,
-# so numeric tasks use UP's generic grounder (which preserves int fluents and
-# increase/decrease/assign effects).
+# reachability grounder prunes classical tasks well but rejects numeric and
+# temporal ones, so those use UP's generic grounder (which preserves int
+# fluents, increase/decrease/assign effects and durative actions).
 _PRE_COMPILERS = [
     ["up_quantifiers_remover", CompilationKind.QUANTIFIERS_REMOVING],
     ["up_negative_conditions_remover", CompilationKind.NEGATIVE_CONDITIONS_REMOVING],
@@ -40,8 +54,9 @@ _PRE_COMPILERS = [
 
 def _compilation_list(problem):
     kind = problem.kind
-    numeric = kind.has_int_fluents() or kind.has_real_fluents()
-    grounder = "up_grounder" if numeric else "fast-downward-reachability-grounder"
+    generic = (kind.has_int_fluents() or kind.has_real_fluents()
+               or kind.has_continuous_time())
+    grounder = "up_grounder" if generic else "fast-downward-reachability-grounder"
     return _PRE_COMPILERS + [[grounder, CompilationKind.GROUNDING]]
 
 
@@ -53,8 +68,9 @@ class ABAEncoder:
     (atom -> (grounded action, step)) and :attr:`map_back` off it.
     """
 
-    def __init__(self, problem):
+    def __init__(self, problem, time_scale: int = DEFAULT_TIME_SCALE):
         self.problem = problem
+        self.time_scale = time_scale
         # Shared front-end: run the UP compilation pipeline and keep the
         # composed map-back that lifts a plan onto the user's original problem.
         self.grounded_problem, self.map_back = run_compilers(problem, _compilation_list(problem))
@@ -66,6 +82,17 @@ class ABAEncoder:
         # stands for, so plan extraction is a dict lookup rather than string
         # surgery on atom names.
         self.action_atoms = {}
+        # Temporal: {gap assumption atom: (step, gap)}, {snap action name:
+        # (durative action name, 'start'|'end')} and the same keyed by the
+        # step's action atom, which is what plan extraction reads.
+        self.delta_atoms = {}
+        self.snap_atoms = {}
+        self.snap_action_atoms = {}
+        # The real duration of one integer time unit (see common.temporal).
+        self.time_unit = Fraction(1)
+        # Whether the always-derivable atom that blocks an action outright has
+        # been laid down (see _resolve_overall_breakers).
+        self._blocked = False
         # Numeric fluent value domain per step: {k: {fkey: set(int)}}.
         self._domain = {}
         # str(comparison FNode) -> short stable id, so comparison atoms are safe
@@ -74,11 +101,42 @@ class ABAEncoder:
 
         self._extract_task()
 
+    @property
+    def is_temporal(self) -> bool:
+        """Whether plans for this task are schedules. Not simply "it has durative
+        actions": a task can be temporal and still have every durative action
+        pruned as unreachable, and its plans are still validated as schedules."""
+        return bool(self._durative) or self.problem.kind.has_continuous_time()
+
     # ------------------------------------------------------------------ #
     # Task extraction: classify fluents, collect actions, init, goals.
     # ------------------------------------------------------------------ #
     def _extract_task(self):
         gp = self.grounded_problem
+
+        # Durative actions are replaced by the two snap actions they decompose
+        # into, which then go through the ordinary STRIPS extraction below; what
+        # couples them back together is collected in self._durative.
+        self.time_unit, decompositions = split_durative_actions(gp, self.time_scale)
+        actions = [a for a in gp.actions if not isinstance(a, DurativeAction)]
+        self._durative = []
+        for snap in decompositions:
+            actions += [snap.start, snap.end]
+            self.snap_atoms[snap.start.name] = (snap.action.name, 'start')
+            self.snap_atoms[snap.end.name] = (snap.action.name, 'end')
+            self._durative.append({
+                "name": snap.action.name,
+                "up_action": snap.action,
+                "start": snap.start.name,
+                "end": snap.end.name,
+                "duration": snap.duration,
+                "overall": [self._overall_atom(snap, c) for c in snap.overall],
+            })
+        self._durative_by_name = {d["name"]: d for d in self._durative}
+        # The gap between two happenings is one of these; as in the PLASP
+        # encoding no gap ever has to exceed the longest duration in the task.
+        self._delays = list(range(1, 1 + max(
+            (d["duration"][1] for d in self._durative), default=0)))
 
         self._numeric_names = {
             f.name for f in gp.fluents if f.type.is_int_type() or f.type.is_real_type()
@@ -86,7 +144,7 @@ class ABAEncoder:
         # A boolean fluent is "flexible" iff some action effect mentions it; the
         # rest are rigid (timeless) facts. Numeric fluents are handled separately.
         self._flexible_names = {
-            e.fluent.fluent().name for a in gp.actions for e in a.effects
+            e.fluent.fluent().name for a in actions for e in a.effects
             if e.fluent.fluent().name not in self._numeric_names
         }
 
@@ -114,7 +172,7 @@ class ABAEncoder:
         # split into boolean-fluent atoms and numeric comparisons; effects into
         # boolean add/delete and numeric increase/decrease/assign.
         self._actions = []
-        for action in gp.actions:
+        for action in actions:
             bool_pre, num_pre = [], []
             for p in action.preconditions:
                 if p.is_fluent_exp() and p.fluent().type.is_bool_type():
@@ -163,6 +221,62 @@ class ABAEncoder:
         for atom in self._goal_literals:
             if atom[0] in self._flexible_names:
                 self._all_flexible_instances.add(atom)
+
+        self._resolve_overall_breakers()
+
+    def _overall_atom(self, snap, condition):
+        """The boolean fluent instance an over-all condition names.
+
+        Only boolean over-all conditions are supported: an action breaks one iff
+        it has the fluent among its delete effects, which is a static property
+        the encoding can turn into a contrary. A numeric over-all condition is
+        broken or not depending on the value an effect produces, which cannot be
+        decided without the state the action is about to reach -- the very state
+        the contrary would have to gate.
+        """
+        if not (condition.is_fluent_exp() and condition.fluent().type.is_bool_type()):
+            raise NotImplementedError(
+                f"Over-all condition {condition} of durative action "
+                f"{snap.action.name!r} is not a boolean fluent; the ABA encoding "
+                "supports boolean over-all conditions only -- use the PLASP backend.")
+        return (condition.fluent().name, tuple(str(a) for a in condition.args))
+
+    def _resolve_overall_breakers(self):
+        """Turn each durative action's over-all conditions into static tests.
+
+        PDDL 2.1 makes them hold across the open interval, which here is the
+        states from the one the start snap produces to the one the end snap
+        consumes. Exactly one action happens per step, so that splits into two
+        conditions the ABA framework can carry:
+
+          * the invariant already holds where the interval opens -- a
+            precondition of the start snap, plus the start snap not deleting it;
+          * nothing deletes it inside -- no action with it among its delete
+            effects may fire while the interval is open. The action closing the
+            interval is exempt: its effects land at the end, past the invariant.
+
+        A start snap that deletes one of its own over-all conditions breaks the
+        invariant at the very first state it covers, which no contrary on `run`
+        can catch (the interval is not open yet when the snap fires). Such an
+        action can never run legally, so it is blocked outright.
+        """
+        by_name = {action["name"]: action for action in self._actions}
+        for durative in self._durative:
+            protected = set(durative["overall"])
+            durative["breakers"] = [
+                action["name"] for action in self._actions
+                if action["name"] != durative["end"]
+                and protected.intersection(action["neg_effects"])
+            ]
+            start = by_name.get(durative["start"])
+            durative["self_breaking"] = bool(start and protected.intersection(start["neg_effects"]))
+            if start is None:
+                continue
+            for atom in protected:
+                if atom not in start["bool_pre"]:
+                    start["bool_pre"].append(atom)
+                if atom[0] in self._flexible_names:
+                    self._all_flexible_instances.add(atom)
 
     def _collect_goal(self, expr):
         if expr.is_and():
@@ -308,6 +422,41 @@ class ABAEncoder:
         cmp_id = self._cmp_ids.setdefault(str(cmp_fnode), f"cmp{len(self._cmp_ids)}")
         return f"{cmp_id}_{k}"
 
+    # Temporal atoms. `run` and `rem` are SMTPlan's run(a, h) and dur(a, h);
+    # `dlt` is the gap between two happenings; the rest are the assumptions that
+    # turn "must hold" / "must not hold" into attacks.
+    @staticmethod
+    def _run(name, k):
+        return f"run_{name}_{k}"
+
+    @staticmethod
+    def _nrun(name, k):
+        return f"nrun_{name}_{k}"
+
+    @staticmethod
+    def _nend(name, k):
+        return f"nend_{name}_{k}"
+
+    @staticmethod
+    def _rem(name, v, k):
+        return f"rem_{name}_{v}_{k}"
+
+    @staticmethod
+    def _nrem(name, k):
+        return f"nrem_{name}_{k}"
+
+    @staticmethod
+    def _dlt(d, k):
+        return f"dlt_{d}_{k}"
+
+    @staticmethod
+    def _anyrun(k):
+        return f"anyrun_{k}"
+
+    @staticmethod
+    def _noopen(k):
+        return f"noopen_{k}"
+
     # ------------------------------------------------------------------ #
     # Framework mutators.
     # ------------------------------------------------------------------ #
@@ -321,6 +470,15 @@ class ABAEncoder:
 
     def _add_contrary(self, assumption, contrary):
         self.formula["contraries"].append((assumption, contrary))
+
+    def _require(self, assumption, contrary):
+        """Register (once) an assumption whose contrary is `contrary`, and
+        return it. Adding it to something's bar says "`contrary` must hold";
+        putting it in a rule body says "`contrary` must not"."""
+        if assumption not in self._assumptions:
+            self._add_assumption(assumption)
+            self._add_contrary(assumption, contrary)
+        return assumption
 
     # ------------------------------------------------------------------ #
     # Numeric value domains (per step), computed incrementally.
@@ -409,9 +567,15 @@ class ABAEncoder:
             self._encode_numeric_effects(action, ae_atom, k)
 
             # The action atom is an assumption; remember what it denotes so the
-            # plan can be read straight off the stable extension.
+            # plan can be read straight off the stable extension. A snap action
+            # denotes the durative action it is half of.
             self._add_assumption(a_atom)
-            self.action_atoms[a_atom] = (action["up_action"], k)
+            snap = self.snap_atoms.get(action["name"])
+            if snap is None:
+                self.action_atoms[a_atom] = (action["up_action"], k)
+            else:
+                self.action_atoms[a_atom] = (self._durative_by_name[snap[0]]["up_action"], k)
+                self.snap_action_atoms[a_atom] = snap
 
             # bar(a_k): only one action fires per step, and every precondition
             # (boolean or numeric) must hold at step k for a_k to stand.
@@ -425,6 +589,82 @@ class ABAEncoder:
 
         self._encode_bool_frame(k)
         self._encode_num_frame(k)
+        self._encode_temporal(k)
+
+    def _encode_temporal(self, k):
+        """The happening layer at step k: the gap to the next happening, and
+        each durative action's open interval and remaining duration.
+
+        This is the ABA counterpart of the temporal layer of the PLASP encoding,
+        so SMTPlan's H9--H10 and H14--H15 with `run` and `dur` as atoms. States
+        are numbered as everywhere else here: the action at step k turns state k
+        into state k+1, and the gap `dlt` is the time between those two
+        happenings -- so an action that starts at step k opens its interval at
+        state k+1 and the end snap that closes it at step e needs the remaining
+        duration to have reached 0 at state e+1.
+        """
+        if not self._durative:
+            return
+        ha = self._ha(k)
+
+        # Exactly one gap per step, by the mutually-contrary-assumptions pattern
+        # that already picks one action per step. When no interval is open
+        # across the gap, no duration equation spans it and the next happening
+        # may as well be at the earliest legal time -- pruning, not semantics,
+        # but it is what keeps the gap domain from multiplying out at every step.
+        gaps = [(self._dlt(d, k), d) for d in self._delays]
+        for atom, d in gaps:
+            self._add_assumption(atom)
+            self.delta_atoms[atom] = (k, d)
+            for other, _ in gaps:
+                if other != atom:
+                    self._add_contrary(atom, other)
+            if d != 1:
+                self._add_contrary(atom, self._require(self._noopen(k), self._anyrun(k)))
+
+        for durative in self._durative:
+            name = durative["name"]
+            start_atom = self._act(durative["start"], k)
+            end_atom = self._act(durative["end"], k)
+            run_now, run_next = self._run(name, k), self._run(name, k + 1)
+            self._add_rule(self._anyrun(k), [run_now])
+
+            # sta -> run, and the interval stays open until the end snap fires.
+            self._add_rule(run_next, [start_atom])
+            nend = self._nend(name, k)
+            self._add_assumption(nend)
+            self._add_contrary(nend, end_atom)
+            self._add_rule(run_next, [run_now, ha, nend])
+
+            # sta -> not run(k): a durative action may not overlap itself.
+            self._add_contrary(start_atom, run_now)
+            # end -> run(k): an end snap has to close an interval that is open.
+            self._add_contrary(end_atom, self._require(self._nrun(name, k), run_now))
+
+            # dur = D when the action starts, decremented by the gap for as long
+            # as the interval is open, and exactly 0 where the end snap closes
+            # it. A duration *inequality* lays down every admissible length, so
+            # the end may fire at whichever of them elapses first.
+            lower, upper = durative["duration"]
+            for value in range(lower, upper + 1):
+                self._add_rule(self._rem(name, value, k + 1), [start_atom])
+            for value in range(upper + 1):
+                for d in self._delays:
+                    if d <= value:
+                        self._add_rule(self._rem(name, value - d, k + 1),
+                                       [self._rem(name, value, k), self._dlt(d, k), run_now])
+            self._add_contrary(end_atom, self._require(self._nrem(name, k + 1),
+                                                       self._rem(name, 0, k + 1)))
+
+            # Over-all conditions: nothing that deletes one may happen inside the
+            # interval (see _resolve_overall_breakers).
+            for breaker in durative["breakers"]:
+                self._add_contrary(self._act(breaker, k), run_now)
+            if durative["self_breaking"]:
+                if not self._blocked:
+                    self._blocked = True
+                    self._add_rule("blocked", [])
+                self._add_contrary(start_atom, "blocked")
 
     def _require_bool(self, atom, k):
         """Assumption `not_p_k` ("p fails at step k") with contrary "p holds at
@@ -505,4 +745,8 @@ class ABAEncoder:
         body = [self._f(*atom, k) if atom[0] in self._flexible_names else self._f(*atom)
                 for atom in self._goal_literals]
         body += [self._emit_comparison(cmp_fnode, k) for cmp_fnode in self._goal_comparisons]
+        # SMTPlan puts !run(a, H-1) in its goal: no durative action may be left
+        # open at the horizon.
+        body += [self._require(self._nrun(d["name"], k), self._run(d["name"], k))
+                 for d in self._durative]
         self._add_rule("goal", body)

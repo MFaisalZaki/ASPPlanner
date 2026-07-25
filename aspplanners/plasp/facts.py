@@ -88,6 +88,24 @@ def is_numeric_comparison(f):
     return g.is_equals() and (_is_numeric_fnode(g.args[0]) or _is_numeric_fnode(g.args[1]))
 
 
+def _signature(parameters):
+    """(ASP variable, ASPType) for each action/fluent parameter."""
+    return [(asp_name(p.name).upper(), ASPType(p.type)) for p in parameters]
+
+
+def _head_term(name, signature):
+    """The ``("name", P1, ...)`` tuple term an action-like head is built from.
+
+    A zero-parameter head is ``("name")``, which clingo reads as the plain
+    string (a one-element parenthesis is not a tuple); the planner's plan
+    extraction relies on that.
+    """
+    inner = f'"{asp_name(name)}"'
+    if signature:
+        inner += ',' + ','.join(variable for variable, _ in signature)
+    return f'({inner})'
+
+
 def _equality_value_term(arg):
     if arg.is_object_exp():
         return f'constant("{asp_name(arg.object().name)}")'
@@ -309,10 +327,8 @@ class ASPAction(ASPTerm):
         # blow past clasp's 28-bit ID space.
         static_fluents = static_fluents or set()
         self.up_action = a
-        name = asp_name(a.name)
-        self.signature = list(map(lambda p: (asp_name(p.name).upper(), ASPType(p.type)), a.parameters))
-        self._head = f"\"{name}\"," + ','.join(p[0] for p in self.signature) if len(self.signature) > 0 else f"\"{name}\""
-        self._head = f"action(({self._head}))"
+        self.signature = _signature(a.parameters)
+        self._head = f"action({_head_term(a.name, self.signature)})"
         self._sig_body = ', '.join(f'has({p[0]}, {str(p[1])})' for p in self.signature)
 
 
@@ -425,6 +441,80 @@ class ASPAction(ASPTerm):
         _sig += self._preconditions
         _sig += self._postconditions
         return '\n'.join(_sig)
+
+
+class ASPDurativeAction(ASPTerm):
+    """The temporal facts tying a durative action to its two snap actions.
+
+    A durative action is encoded as the pair of instantaneous *snap* actions
+    PDDL 2.1 decomposes it into -- exactly what SMTPlan's happening encoder
+    does. Their at-start / at-end conditions and effects travel as ordinary
+    ``precondition``/``postcondition`` facts of the snap actions themselves
+    (see :class:`ASPAction`), so all this builder emits is what the encoding's
+    temporal layer needs to couple the two halves back together:
+
+      * ``durativeAction/1``  -- the durative action term, which also switches
+        the temporal layer on;
+      * ``snap/3``            -- which ordinary action is its start and its end;
+      * ``durationValue/2``   -- the admissible durations in scaled time units
+        (an interval when the task states a duration *constraint* rather than a
+        fixed duration);
+      * ``overall/3`` / ``numOverall/4`` -- the over-all conditions, which
+        belong to neither snap: the encoding checks them at every happening the
+        action spans.
+
+    Each fact is guarded by the snap action it belongs to, so on a lifted task
+    they instantiate for exactly the parameter bindings the snap actions do.
+    """
+
+    def __init__(self, da, start_name, end_name, duration_bounds, overall_conditions):
+        self.up_action = da
+        signature = _signature(da.parameters)
+        self._head  = f"durative({_head_term(da.name, signature)})"
+        self._start = f"action({_head_term(start_name, signature)})"
+        self._end   = f"action({_head_term(end_name, signature)})"
+
+        lower, upper = duration_bounds
+        if lower > upper:
+            raise ValueError(
+                f"Durative action {da.name!r} has an empty duration interval "
+                f"[{lower}, {upper}] in scaled time units.")
+        if lower < 1:
+            raise NotImplementedError(
+                f"Durative action {da.name!r} can have zero duration; the happening "
+                "encoding needs every action to span at least one time unit.")
+        self._duration = str(lower) if lower == upper else f"{lower}..{upper}"
+
+        self._overall = []
+        for condition in overall_conditions:
+            atoms = parseexpr(condition)
+            atoms = [atoms] if not isinstance(atoms, list) else atoms
+            while any(isinstance(a, list) for a in atoms):
+                atoms = [e for a in atoms for e in (a if isinstance(a, list) else [a])]
+            for atom in atoms:
+                if isinstance(atom, ASPNumComparison):
+                    self._overall.append(f"numOverall({self._head}, {str(atom)})")
+                elif isinstance(atom, ASPExpr):
+                    self._overall.append(
+                        f"overall({self._head}, {str(atom)}, value({str(atom)}, {atom.value}))")
+                else:
+                    raise NotImplementedError(
+                        f"Unsupported over-all condition in durative action "
+                        f"{da.name!r}: {condition}")
+
+    def __str__(self):
+        # `action(<term>)` is the declaration atom of the snap action (plasp
+        # tags terms with their declaring predicate); guarding on it is what
+        # instantiates these facts for exactly the bindings the snap has.
+        started, ended = f"action({self._start})", f"action({self._end})"
+        facts = [
+            f"durativeAction({self._head}) :- {started}.",
+            f"snap({self._head}, start, {self._start}) :- {started}.",
+            f"snap({self._head}, end, {self._end}) :- {ended}.",
+            f"durationValue({self._head}, {self._duration}) :- {started}.",
+        ]
+        facts += [f"{atom} :- {started}." for atom in self._overall]
+        return '\n'.join(facts)
 
 
 class ASPStateVarVal(ASPTerm):

@@ -13,14 +13,16 @@ back onto the user's problem.
 ``import aspplanners`` works without it.
 """
 
+from fractions import Fraction
 from typing import List, Optional
 
 import clingo
 
 from unified_planning.engines import PlanGenerationResultStatus
 from unified_planning.plans.sequential_plan import SequentialPlan
-from unified_planning.plans import ActionInstance
+from unified_planning.plans import ActionInstance, TimeTriggeredPlan
 
+from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.common.validation import validate_plan
 from aspplanners.abaplan.encoder import ABAEncoder
 
@@ -33,9 +35,9 @@ class ABAPlan:
     mirroring :class:`~aspplanners.plasp.planner.PLASPPlanner`.
     """
 
-    def __init__(self, problem):
+    def __init__(self, problem, time_scale: int = DEFAULT_TIME_SCALE):
         self.problem = problem
-        self.encoder = ABAEncoder(problem)
+        self.encoder = ABAEncoder(problem, time_scale=time_scale)
         self.status: Optional[PlanGenerationResultStatus] = None
         self.logs: List[str] = []
 
@@ -72,28 +74,75 @@ class ABAPlan:
             return None
         return solver._interpret_extension(solver._last_model)
 
-    def _extract_plan(self, extension) -> SequentialPlan:
+    def _extract_plan(self, extension):
         """Read the ordered action instances off a stable extension.
 
         The extension's assumptions are the action atoms plus the auxiliary
         assumptions; keep only those registered as actions, order them by step,
-        and lift onto the user's original problem.
+        and lift onto the user's original problem. A temporal task yields a
+        `TimeTriggeredPlan`, everything else a `SequentialPlan`.
         """
         action_atoms = self.encoder.action_atoms
         steps = sorted(
-            (action_atoms[a] for a in extension.assumptions if a in action_atoms),
-            key=lambda step_action: step_action[1],
+            ((atom, *action_atoms[atom]) for atom in extension.assumptions if atom in action_atoms),
+            key=lambda step: step[2],
         )
-        plan = SequentialPlan([ActionInstance(action) for action, _k in steps])
+        if self.encoder.is_temporal:
+            plan = self._time_triggered_plan(extension, steps)
+        else:
+            plan = SequentialPlan([ActionInstance(action) for _atom, action, _k in steps])
         return plan.replace_action_instances(self.encoder.map_back)
 
-    def plan(self, max_horizon=1000, semantics="ST") -> SequentialPlan:
+    def _time_triggered_plan(self, extension, steps) -> TimeTriggeredPlan:
+        """Turn the extension's snap actions and gaps into a schedule.
+
+        The action at step k happens at the happening state k+1 opens, whose
+        absolute time is the sum of the gaps chosen for steps 0..k; a durative
+        action may not overlap itself, so its start is closed by the next end of
+        the same action and the pair becomes one entry.
+        """
+        unit = self.encoder.time_unit
+        snaps = self.encoder.snap_action_atoms
+        gaps = dict(self.encoder.delta_atoms[atom]
+                    for atom in extension.assumptions if atom in self.encoder.delta_atoms)
+        clock, happening_time = 0, {}
+        for step in sorted(gaps):
+            clock += gaps[step]
+            happening_time[step] = clock
+
+        timed, open_starts = [], {}
+        for atom, action, k in steps:
+            at = Fraction(happening_time.get(k, 0)) * unit
+            snap = snaps.get(atom)
+            if snap is None:
+                timed.append([at, ActionInstance(action), None])
+                continue
+            durative_name, half = snap
+            if half == 'start':
+                open_starts[durative_name] = len(timed)
+                timed.append([at, ActionInstance(action), None])
+            else:
+                start = timed[open_starts.pop(durative_name)]
+                start[2] = at - start[0]
+        if open_starts:
+            raise ValueError(
+                f"The stable extension leaves {sorted(open_starts)} running at the "
+                "horizon; the goal rule should have ruled that out.")
+        return TimeTriggeredPlan([tuple(step) for step in timed])
+
+    def _empty_plan(self):
+        """The "no plan" value, of whichever plan class this task produces."""
+        return TimeTriggeredPlan([]) if self.encoder.is_temporal else SequentialPlan([])
+
+    def plan(self, max_horizon=1000, semantics="ST"):
         """Search increasing horizons until a plan is found.
 
         Extends the ABA framework one step per horizon, and at each horizon
         asks the solver for a stable extension deriving the goal. Returns the
-        plan mapped back onto the original problem (empty when none is found up
-        to `max_horizon`); the outcome is also recorded in ``self.status``.
+        plan mapped back onto the original problem -- a `SequentialPlan`, or a
+        `TimeTriggeredPlan` when the task has durative actions -- and the empty
+        plan when none is found up to `max_horizon`; the outcome is also
+        recorded in ``self.status``.
         """
         self.logs = []
         for k in range(max_horizon + 1):
@@ -107,7 +156,7 @@ class ABAPlan:
             if not is_valid:
                 self.status = PlanGenerationResultStatus.INTERNAL_ERROR
                 self.logs.append(f"Plan validation failed at horizon {k}: {reason}")
-                return SequentialPlan([])
+                return self._empty_plan()
             self.status = PlanGenerationResultStatus.SOLVED_SATISFICING
             return plan
 
@@ -115,4 +164,4 @@ class ABAPlan:
         self.logs.append(
             f"No plan found up to horizon {max_horizon} "
             "(the task may be solvable with a longer horizon).")
-        return SequentialPlan([])
+        return self._empty_plan()
