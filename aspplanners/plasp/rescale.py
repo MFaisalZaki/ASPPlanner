@@ -19,9 +19,15 @@ Two things are deliberately *not* scaled:
 * **Durations.** They live on their own integer grid, computed by
   :func:`~aspplanners.common.temporal.time_unit`, and the planner turns a
   happening back into an absolute time by multiplying by that unit. Scaling them
-  would make every reported plan time wrong by the same factor. A fluent that is
-  *read* as a duration is left alone for the same reason: the encoding looks its
-  value up in the initial state at grounding time.
+  by the task-wide factor would make every reported plan time wrong by that
+  factor, so a fluent *read* as a duration sits out this pass -- the encoding
+  looks its value up in the initial state at grounding time.
+
+  Sitting out the task-wide factor is not the same as staying fractional, and
+  satellite states `(= (slew_time ?a ?b) 5.9)`. So each duration fluent gets a
+  factor of its own instead (:func:`duration_fluent_scales`), which the
+  ``durationValue`` arithmetic divides straight back out -- it is scaled only
+  where it is read as a duration, so no plan time moves.
 
 This pass belongs to the PLASP backend rather than to the shared front-end: the
 shapes it walks have to track those of :mod:`aspplanners.plasp.facts` exactly,
@@ -48,6 +54,91 @@ def _fluent_names(expression):
     return set().union(set(), *(_fluent_names(arg) for arg in expression.args))
 
 
+def _duration_fluent_names(task):
+    """Every fluent name read as a durative action's duration, at any depth."""
+    return {name
+            for da in durative_actions(task)
+            for bound in (da.duration.lower, da.duration.upper)
+            for name in _fluent_names(bound)}
+
+
+def duration_fluent_scales(task):
+    """``{fluent name: factor}`` putting each duration fluent's values on an
+    integer grid -- computed, not applied (see :func:`apply_duration_scales`).
+
+    Duration fluents sit out :func:`scale_numeric_constants` because scaling
+    them would make every reported plan time wrong by that factor. But their
+    values still have to reach clingo as integer terms, and satellite states
+    `(= (slew_time ?a ?b) 5.9)`. So each one gets its *own* factor, and the
+    duration arithmetic divides that factor straight back out -- the fluent is
+    scaled only where it is read as a duration, so nothing else can see it.
+
+    Computed before the durative split and applied after, because the time grid
+    (:func:`~aspplanners.common.temporal.time_unit`) has to be built from the
+    task's real durations, not from these scaled stand-ins.
+    """
+    duration_fluents = _duration_fluent_names(task)
+    if not duration_fluents:
+        return {}
+
+    denominators = {}
+    for fluent_exp, value in task.explicit_initial_values.items():
+        name = fluent_exp.fluent().name
+        if name in duration_fluents and _is_numeric_value(value):
+            denominators.setdefault(name, set()).add(
+                Fraction(value.constant_value()).denominator)
+    for fluent, value in task.fluents_defaults.items():
+        if fluent.name in duration_fluents and _is_numeric_value(value):
+            denominators.setdefault(fluent.name, set()).add(
+                Fraction(value.constant_value()).denominator)
+
+    scales = {}
+    for name in duration_fluents:
+        scale = 1
+        for denominator in denominators.get(name, ()):
+            scale = scale * denominator // gcd(scale, denominator)
+        scales[name] = scale
+
+    fractional = {name for name, scale in scales.items() if scale > 1}
+    if not fractional:
+        return scales
+    for name in sorted(fractional):
+        _check_scale(scales[name], denominators.get(name, {1}))
+    # A duration fluent that is also compared or assigned somewhere would need
+    # one value for the duration and another for that comparison; the global
+    # pass refuses the same overlap for the same reason.
+    _, in_numeric_slots = _walk(task, None, set())
+    conflicting = fractional & in_numeric_slots
+    if conflicting:
+        raise NotImplementedError(
+            f"Fluent(s) {sorted(conflicting)} are read as a durative action's duration "
+            f"and also appear in a numeric condition or effect, and their values are "
+            f"fractional; the duration reading has to be put on an integer grid, which "
+            f"the other reading would then see. Use a separate fluent for the duration.")
+    return scales
+
+
+def apply_duration_scales(task, scales) -> None:
+    """Multiply each duration fluent's initial values by its factor, in place.
+
+    Run after the initial state is complete and after the durative split, so the
+    only thing left to read these values is the fact builder.
+    """
+    fractional = {name for name, scale in (scales or {}).items() if scale > 1}
+    if not fractional:
+        return
+    em = task.environment.expression_manager
+    for fluent_exp, value in list(task.explicit_initial_values.items()):
+        name = fluent_exp.fluent().name
+        if name in fractional and _is_numeric_value(value):
+            task.set_initial_value(
+                fluent_exp, em.Real(Fraction(value.constant_value()) * scales[name]))
+    for fluent, value in list(task.fluents_defaults.items()):
+        if fluent.name in fractional and _is_numeric_value(value):
+            task.fluents_defaults[fluent] = em.Real(
+                Fraction(value.constant_value()) * scales[fluent.name])
+
+
 def scale_numeric_constants(task) -> int:
     """Multiply `task`'s numeric values by the least factor making them whole.
 
@@ -61,10 +152,7 @@ def scale_numeric_constants(task) -> int:
     # Nested occurrences count too -- depots' `(/ (distance ?y ?z) (speed ?x))`
     # is not itself a fluent expression, but scaling either fluent inside it
     # would scale the duration the encoding then reads.
-    duration_fluents = {name
-                        for da in durative_actions(task)
-                        for bound in (da.duration.lower, da.duration.upper)
-                        for name in _fluent_names(bound)}
+    duration_fluents = _duration_fluent_names(task)
 
     denominators, scaled_fluents = _walk(task, None, duration_fluents)
     scale = 1
@@ -295,4 +383,5 @@ def _check_duration_fluents(conflicting, scale):
         f"duration, or state the task in units that make its numbers whole.")
 
 
-__all__ = ['scale_numeric_constants', 'MAX_NUMERIC_SCALE']
+__all__ = ['scale_numeric_constants', 'duration_fluent_scales',
+           'apply_duration_scales', 'MAX_NUMERIC_SCALE']

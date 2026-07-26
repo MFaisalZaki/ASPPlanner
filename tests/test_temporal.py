@@ -749,3 +749,26 @@ def test_an_arithmetic_duration_survives_numeric_rescaling():
     assert planner.status == Status.SOLVED_SATISFICING, planner.logs
     (_start, _action, duration), = plan.timed_actions
     assert duration == 6, f"dist(l1) + 1 should last 6, got {duration}"
+
+
+@backends
+def test_a_fractional_duration_keeps_its_value(backend, make_planner):
+    """`(/ 5.9 2)` is 2.95, and the schedule has to say so.
+
+    The fluents read as durations sit out the task-wide numeric rescaling (it
+    would move every reported plan time), so they get an integer grid of their
+    own that the duration arithmetic divides back out. Getting that factor wrong
+    scales the leg rather than breaking it, which is why the value is asserted
+    and not just the status -- and why the schedule is validated against the
+    original task, where the duration is still 5.9.
+    """
+    problem = parse("arithdrive", "problem-fractional.pddl")
+    planner = make_planner(problem)
+    plan = planner.plan(max_horizon=8)
+
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert_schedule_is_over_original_problem(problem, plan)
+    legs = {tuple(str(p) for p in ai.actual_parameters): duration
+            for _s, ai, duration in plan.timed_actions}
+    assert legs[("car", "l1", "l2")] == Fraction(59, 20), legs
+    assert legs[("car", "l2", "l3")] == Fraction(3, 2), legs
