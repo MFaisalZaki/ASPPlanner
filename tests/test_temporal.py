@@ -29,8 +29,10 @@ from unified_planning.shortcuts import (
     PlanValidator,
     Problem,
     StartTiming,
+    get_environment,
 )
 
+from aspplanners.common.validation import as_validated
 from aspplanners.plasp.planner import PLASPPlanner
 
 PDDL_DIR = os.path.join(os.path.dirname(__file__), "pddl")
@@ -98,7 +100,7 @@ def assert_schedule_is_over_original_problem(problem, plan):
             "whether it is a durative action"
         )
     with PlanValidator(name="up_time_triggered_validator") as validator:
-        result = validator.validate(problem, plan)
+        result = validator.validate(as_validated(problem), plan)
     assert str(result.status) == "ValidationResultStatus.VALID", (
         f"schedule does not validate against the original problem: {result}"
     )
@@ -470,3 +472,122 @@ def test_engine_accepts_and_solves_a_temporal_task(engine):
         result = planner.solve(problem)
     assert result.status == Status.SOLVED_SATISFICING, [str(m) for m in result.log_messages or []]
     assert_schedule_is_over_original_problem(problem, result.plan)
+
+
+def test_plasp_accepts_a_makespan_metric_and_an_undefined_initial_value():
+    """The two features every IPC temporal instance carries.
+
+    `(:metric minimize (total-time))` is MAKESPAN and a `(:functions ...)` cross
+    product that `(:init ...)` only partly fills is UNDEFINED_INITIAL_NUMERIC;
+    neither says anything about whether a plan exists, and leaving them out of
+    supported_kind() rejected the whole temporal track at `supports()`.
+    """
+    problem = parse("tempdrive", "problem-ipc-shaped.pddl")
+    assert {"MAKESPAN", "UNDEFINED_INITIAL_NUMERIC"} <= problem.kind.features
+
+    with OneshotPlanner(name="PLASPPlanner") as planner:
+        assert planner.supports(problem.kind)
+        result = planner.solve(problem)
+    assert result.status == Status.SOLVED_SATISFICING, [str(m) for m in result.log_messages or []]
+    assert_schedule_is_over_original_problem(problem, result.plan)
+    # The undefined `travel-time` entries default to 0, but the durations were
+    # read off the initial state before that, so the two drives keep their own.
+    assert sorted(end - start for start, end in intervals(result.plan)["drive"]) == [2, 3]
+
+
+def test_aba_takes_the_metric_but_still_declines_an_undefined_initial_value():
+    """The ABA reduction is over ground STRIPS and no installed UP grounder
+    accepts an undefined initial value, so it has to keep saying no to that --
+    at `supports()`, rather than raising from inside the encoder."""
+    with_metric = parse("tempdrive", "problem-metric-only.pddl")
+    undefined = parse("tempdrive", "problem-ipc-shaped.pddl")
+    assert "MAKESPAN" in with_metric.kind.features
+    assert "UNDEFINED_INITIAL_NUMERIC" not in with_metric.kind.features
+
+    with OneshotPlanner(name="ABAPlanner") as planner:
+        assert planner.supports(with_metric.kind)
+        assert not planner.supports(undefined.kind)
+
+
+@pytest.mark.parametrize("engine", ["PLASPPlanner", "ABAPlanner"])
+def test_engines_are_satisficing_not_optimal(engine):
+    """Metrics are accepted, never optimised: the search returns the first plan
+    it finds, so a caller asking for an optimal engine must not be given one."""
+    from unified_planning.engines import OptimalityGuarantee
+
+    factory = get_environment().factory
+    engine_class = factory.engine(engine)
+    assert engine_class.satisfies(OptimalityGuarantee.SATISFICING)
+    assert not engine_class.satisfies(OptimalityGuarantee.SOLVED_OPTIMALLY)
+
+
+# ---------------------------------------------------------------------------
+# Rescaling numeric values leaves the time grid alone
+# ---------------------------------------------------------------------------
+
+def _fractional_alongside(problem, duration_fluent_in_condition=False):
+    """`problem` plus an unrelated fluent whose values force a rescaling.
+
+    The point is that rescaling has to touch the numeric fluents and *not* the
+    durations, which live on their own integer grid and are turned back into
+    absolute times by multiplying by the time unit.
+    """
+    from fractions import Fraction
+    from unified_planning.shortcuts import LE, RealType
+
+    task = problem.clone()
+    fuel = Fluent("fuel", RealType())
+    task.add_fluent(fuel, default_initial_value=Fraction(0))
+    burn = InstantaneousAction("burn")
+    burn.add_increase_effect(fuel(), Fraction(1, 2))
+    if duration_fluent_in_condition:
+        # `travel-time` is what `drive` reads its duration off, so asking for it
+        # in scaled units too is contradictory.
+        travel = task.fluent("travel-time")
+        locations = list(task.all_objects)
+        burn.add_precondition(LE(travel(locations[0], locations[1]), 1))
+    task.add_action(burn)
+    return task
+
+
+def test_rescaling_numeric_values_leaves_the_durations_alone():
+    """A fractional numeric fluent forces a factor of 2; the schedule's own
+    numbers -- the time unit and every durationValue -- must not move with it."""
+    plain = PLASPPlanner(parse("tempdrive"))
+    scaled = PLASPPlanner(_fractional_alongside(parse("tempdrive")))
+
+    assert plain.compiled_task.numeric_scale == 1
+    assert scaled.compiled_task.numeric_scale == 2
+    assert scaled.compiled_task.time_unit == plain.compiled_task.time_unit
+
+    def durations(planner):
+        return {line for line in planner.compiled_task.facts["_durative"]
+                if line.startswith("durationValue")}
+
+    assert durations(scaled) == durations(plain)
+
+
+def test_a_duration_fluent_read_in_a_numeric_condition_is_rejected():
+    """`travel-time` is looked up in the initial state at grounding time, so its
+    value is in the task's own units; a condition that needs it in the rescaled
+    ones cannot have both."""
+    task = _fractional_alongside(parse("tempdrive"), duration_fluent_in_condition=True)
+    with pytest.raises(NotImplementedError, match="read as a durative action's duration"):
+        PLASPPlanner(task)
+
+
+def test_a_temporal_task_with_fractional_values_still_schedules():
+    """End to end: the rescaled numeric layer and the untouched time grid have to
+    coexist in one plan, validated against the original units."""
+    from fractions import Fraction
+    from unified_planning.shortcuts import GE as _GE, RealType
+
+    task = _fractional_alongside(parse("tempdrive"))
+    fuel = task.fluent("fuel")
+    task.add_goal(_GE(fuel(), Fraction(1, 2)))
+
+    planner = PLASPPlanner(task)
+    plan = planner.plan(max_horizon=12)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert any(ai.action.name == "burn" for _s, ai, _d in plan.timed_actions)
+    assert_schedule_is_over_original_problem(task, plan)

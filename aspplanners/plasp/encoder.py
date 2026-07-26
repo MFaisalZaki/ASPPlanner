@@ -20,7 +20,12 @@ from functools import partial
 from unified_planning.plans import ActionInstance
 
 from aspplanners.common.tim_typer import TIMTypeInferenceCompiler
-from aspplanners.common.compilation import compose_map_backs, run_compilers
+from aspplanners.plasp.rescale import scale_numeric_constants
+from aspplanners.common.compilation import (
+    compose_map_backs,
+    initialize_fluent_defaults,
+    run_compilers,
+)
 from aspplanners.common.temporal import (
     DEFAULT_TIME_SCALE,
     add_effect as _add_effect,
@@ -98,6 +103,11 @@ class ASPEncodingResult:
     map_back_action_instance: Callable[[ActionInstance], Optional[ActionInstance]]
     snap_actions: Dict[str, Tuple[str, str]] = field(default_factory=dict)
     time_unit: Fraction = Fraction(1)
+    # What the task's numeric values were multiplied by to make them integral for
+    # clingo (see aspplanners.plasp.rescale); 1 when they already were. Plans are
+    # unaffected -- they are sequences of actions and carry no units -- so this is
+    # here to be inspected rather than to be undone.
+    numeric_scale: int = 1
     # Whether plans for this task are schedules. Not simply `snap_actions != {}`:
     # a task can be temporal and still have every durative action pruned as
     # unreachable, and its plans are still validated as schedules.
@@ -158,17 +168,35 @@ class PLASPEncoder:
         # Compilation pipeline:
         # step one remove delete then set effects.
         new_problem.clear_actions()
-        delete_then_set_map = {}
         for a in problem.actions:
-            clean_action = self._remove_delete_then_set(a)
-            new_problem.add_action(clean_action)
-            delete_then_set_map[clean_action] = a
-        map_backs.append(partial(replace_action, map=delete_then_set_map))
+            new_problem.add_action(self._remove_delete_then_set(a))
+
+        # step two put the task's numeric values on an integer grid, since clingo
+        # terms are integers. A no-op -- and no rewrite at all -- unless the task
+        # actually states a fractional value.
+        #
+        # It has to happen before the durative split further down, which copies
+        # the conditions and effects into fresh snap actions: those are what gets
+        # encoded, so rescaling afterwards would be silently dropped on every
+        # temporal task. It reaches the initial-state *defaults* directly rather
+        # than waiting for initialize_fluent_defaults, because hoisting that call
+        # above the split would feed zeros into the time grid (see
+        # common.temporal._duration_values).
+        numeric_scale = scale_numeric_constants(new_problem)
+
+        # Both of the above restate an action rather than replacing it, so one
+        # map covers them. It is built here rather than as the actions are made
+        # because rescaling mutates them in place and UP hashes an action by its
+        # contents -- a map keyed by the pre-rescale actions would no longer find
+        # them. `clear_actions` re-adds in the original order, so the two lists
+        # line up pairwise.
+        map_backs.append(partial(replace_action,
+                                 map=dict(zip(new_problem.actions, problem.actions))))
 
         new_problem, grounded_map_back = run_compilers(new_problem, compilationlist)
         map_backs.append(grounded_map_back)
 
-        # step two check if we can infer types for untyped problems. TIM works
+        # step three check if we can infer types for untyped problems. TIM works
         # on instantaneous actions over quantifier-free conditions: a temporal
         # task has been grounded by this point anyway, so there are no parameter
         # types left to infer, and a `forall` the encoding keeps (rather than
@@ -182,7 +210,7 @@ class PLASPEncoder:
             new_problem = tim_result.problem
             map_backs.append(tim_result.map_back_action_instance)
 
-        # step three split every durative action into its two snap actions, the
+        # step four split every durative action into its two snap actions, the
         # PDDL 2.1 decomposition SMTPlan's happening encoder is built on. The
         # snaps carry the at-start/at-end halves and are encoded as ordinary
         # actions; `durative_facts` re-couples them (see ASPDurativeAction).
@@ -208,7 +236,7 @@ class PLASPEncoder:
         # facts are emitted: an uninitialized numeric fluent would otherwise
         # have no holds/3 chain, which silently disables every numeric
         # precondition that reads it.
-        self._initialize_fluents(new_problem)
+        initialize_fluent_defaults(new_problem)
 
         # False initial values are dropped, because a variable that is only ever
         # read as true needs no holds/3 chain for its false side and every such
@@ -257,6 +285,7 @@ class PLASPEncoder:
             map_back_action_instance=compose_map_backs(map_backs),
             snap_actions=snap_actions,
             time_unit=time_unit,
+            numeric_scale=numeric_scale,
             is_temporal=temporal or bool(snap_actions),
         )
 
@@ -352,58 +381,3 @@ class PLASPEncoder:
                 else:
                     ret_goals.append(ASPGoalState(atom))
         return ret_goals
-    
-    def _initialize_fluents(self, task:Problem):
-        """
-        Initialize the int and real fluents of a given task with a default value of 0.
-        Any Boolean fluent is initialized with a default value of False.
-        Args:
-            task (Problem): The UP task object
-        Updates:
-            task.initial_defaults: Adds default values for real and integer types.
-            task.explicit_initial_values: Sets initial values for uninitialized fluents.
-        """
-        from unified_planning.shortcuts import Fraction
-        from unified_planning.model.fluent import get_all_fluent_exp
-        # update the initial defaults to account for real and integer types.
-        # Use the task's own environment: with a non-global environment the
-        # global one holds different type/expression manager instances.
-        _env = task.environment
-        _tm = _env.type_manager
-        _em = _env.expression_manager
-        task.initial_defaults.update({_tm.RealType():_em.Real(Fraction(0))})
-        task.initial_defaults.update({_tm.IntType() :_em.Int(0)})
-        task.initial_defaults.update({_tm.BoolType() :_em.Bool(False)})
-
-        # list unitialized fluents.
-        fluentslist = list(chain.from_iterable([list(get_all_fluent_exp(task, f)) for f in task.fluents]))
-        initialized_fluents  = list(task.explicit_initial_values.keys())
-        unintialized_fluents = list(filter(lambda x: not x in initialized_fluents, fluentslist))
-
-        def _default(fluent_exp):
-            """The value to lay down for a fluent instance with none of its own.
-
-            The fluent's own declared default comes first; then the per-type
-            defaults set above -- which a *bounded* type (`integer[0, 10]`) is
-            not a key of, since it is a distinct type object from `IntType()`,
-            so those fall through to a value derived from the type itself.
-            """
-            declared = task.fluents_defaults.get(fluent_exp.fluent())
-            if declared is not None:
-                return declared
-            default = task.initial_defaults.get(fluent_exp.type)
-            if default is not None:
-                return default
-            if fluent_exp.type.is_bool_type():
-                return _em.Bool(False)
-            if fluent_exp.type.is_int_type():
-                return _em.Int(max(0, fluent_exp.type.lower_bound or 0))
-            if fluent_exp.type.is_real_type():
-                return _em.Real(Fraction(max(0, fluent_exp.type.lower_bound or 0)))
-            raise NotImplementedError(
-                f"Fluent {fluent_exp} has no initial value and no default for its type "
-                f"{fluent_exp.type}; give it one in the problem.")
-
-        # update the initial values for the fluents that are not initialized.
-        for fe in unintialized_fluents:
-            task.set_initial_value(fe, _default(fe))

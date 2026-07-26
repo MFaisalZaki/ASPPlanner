@@ -21,6 +21,7 @@ from unified_planning.shortcuts import (
     UserType,
 )
 
+from aspplanners.common.validation import as_validated
 from aspplanners.plasp.planner import PLASPPlanner
 
 
@@ -145,8 +146,11 @@ def assert_plan_is_over_original_problem(problem, plan):
                 f"plan argument {obj.name!r} of {ai} is not an object of the "
                 f"original problem"
             )
+    # Validated under the closed-world reading of the initial state, which is
+    # the one the encoder used; for a task that states all of its initial values
+    # (almost all of them here) that is the very same problem object.
     with PlanValidator(name="sequential_plan_validator") as validator:
-        result = validator.validate(problem, plan)
+        result = validator.validate(as_validated(problem), plan)
     assert str(result.status) == "ValidationResultStatus.VALID", (
         f"plan does not validate against the original problem: {result}"
     )
@@ -1066,3 +1070,42 @@ def test_a_conditional_effect_reads_its_disjunctive_condition(marked, fires):
     assert planner.status == Status.SOLVED_SATISFICING, planner.logs
     assert [ai.action.name for ai in plan.actions] == ["sweep"]
     assert_plan_is_over_original_problem(problem, plan)
+
+
+@pytest.mark.parametrize("numeric", [False, True], ids=["symbolic", "numeric"])
+def test_an_unstated_initial_value_is_read_as_false_by_solver_and_validator(numeric):
+    """A fluent the task never mentions in its initial state is PDDL's implicit
+    false / zero, and the *validator* has to be told the same thing.
+
+    Left to itself it evaluates `not y` over a value that does not exist and
+    calls the plan inapplicable, which used to turn a perfectly good plan into
+    an INTERNAL_ERROR. Completing the initial state is done on a copy, so the
+    problem the caller passed in keeps its gaps.
+    """
+    from unified_planning.shortcuts import Fluent, LE
+
+    opened = Fluent("opened")
+    y = Fluent("y", IntType()) if numeric else Fluent("y")
+
+    flip = InstantaneousAction("flip")
+    flip.add_precondition(LE(y, 0) if numeric else Not(y))
+    flip.add_effect(opened, True)
+
+    problem = Problem("unstated_initial_value")
+    problem.add_fluent(opened)
+    problem.add_fluent(y)                       # no default, and never initialized
+    problem.add_action(flip)
+    problem.set_initial_value(opened, False)
+    problem.add_goal(opened)
+
+    feature = "UNDEFINED_INITIAL_NUMERIC" if numeric else "UNDEFINED_INITIAL_SYMBOLIC"
+    assert feature in problem.kind.features
+    with OneshotPlanner(name="PLASPPlanner") as planner:
+        assert planner.supports(problem.kind)
+        result = planner.solve(problem)
+
+    assert result.status == Status.SOLVED_SATISFICING, [str(m) for m in result.log_messages or []]
+    assert [ai.action.name for ai in result.plan.actions] == ["flip"]
+    assert_plan_is_over_original_problem(problem, result.plan)
+    # the caller's problem is untouched -- completing it happened on a copy
+    assert feature in problem.kind.features

@@ -6,10 +6,13 @@ back onto the user's original problem. These two helpers capture exactly that
 shared front-end; the encoding-specific translation lives in each backend.
 """
 
+from fractions import Fraction
+from itertools import chain
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from unified_planning.shortcuts import Compiler, get_environment
 from unified_planning.model import Problem
+from unified_planning.model.fluent import get_all_fluent_exp
 from unified_planning.plans import ActionInstance
 
 
@@ -68,6 +71,60 @@ def compose_map_backs(map_backs: List[Callable]) -> Callable[[ActionInstance], O
                 return None
         return action_instance
     return _map_back
+
+
+def initialize_fluent_defaults(task: Problem) -> None:
+    """Give every fluent instance of `task` an initial value, in place.
+
+    PDDL leaves most of the initial state implicit -- an unstated predicate is
+    false, and the IPC benchmarks routinely declare a `(:functions ...)` entry
+    for a whole cross product while `(:init ...)` only lists the tuples that are
+    actually reachable (`travel-slow` in elevators-time, say). UP flags that as
+    UNDEFINED_INITIAL_SYMBOLIC / UNDEFINED_INITIAL_NUMERIC; the value laid down
+    here is PDDL's own closed-world reading of it, bool -> false and numeric -> 0.
+
+    Both encoders need this before they read the initial state, and neither would
+    fail loudly without it: `Problem.initial_values` silently *omits* the fluents
+    with no value, so an uninitialized numeric fluent ends up with no holds/3
+    chain (PLASP) and no value domain at step 0 (ABA), which quietly makes every
+    numeric condition reading it unsatisfiable rather than raising.
+    """
+    _env = task.environment
+    _tm, _em = _env.type_manager, _env.expression_manager
+    # Use the task's own environment: with a non-global environment the global
+    # one holds different type/expression manager instances.
+    task.initial_defaults.update({_tm.RealType(): _em.Real(Fraction(0))})
+    task.initial_defaults.update({_tm.IntType(): _em.Int(0)})
+    task.initial_defaults.update({_tm.BoolType(): _em.Bool(False)})
+
+    def _default(fluent_exp):
+        """The value to lay down for a fluent instance with none of its own.
+
+        The fluent's own declared default comes first; then the per-type
+        defaults set above -- which a *bounded* type (`integer[0, 10]`) is not a
+        key of, since it is a distinct type object from `IntType()`, so those
+        fall through to a value derived from the type itself.
+        """
+        declared = task.fluents_defaults.get(fluent_exp.fluent())
+        if declared is not None:
+            return declared
+        default = task.initial_defaults.get(fluent_exp.type)
+        if default is not None:
+            return default
+        if fluent_exp.type.is_bool_type():
+            return _em.Bool(False)
+        if fluent_exp.type.is_int_type():
+            return _em.Int(max(0, fluent_exp.type.lower_bound or 0))
+        if fluent_exp.type.is_real_type():
+            return _em.Real(Fraction(max(0, fluent_exp.type.lower_bound or 0)))
+        raise NotImplementedError(
+            f"Fluent {fluent_exp} has no initial value and no default for its type "
+            f"{fluent_exp.type}; give it one in the problem.")
+
+    initialized = set(task.explicit_initial_values.keys())
+    for fluent_exp in chain.from_iterable(get_all_fluent_exp(task, f) for f in task.fluents):
+        if fluent_exp not in initialized:
+            task.set_initial_value(fluent_exp, _default(fluent_exp))
 
 
 def run_compilers(problem: Problem, compilationlist: List[list]) -> Tuple[Problem, Callable]:

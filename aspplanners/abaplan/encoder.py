@@ -37,7 +37,11 @@ from itertools import product
 from unified_planning.model import DurativeAction
 from unified_planning.shortcuts import CompilationKind, EffectKind
 
-from aspplanners.common.compilation import run_compilers, select_grounder
+from aspplanners.common.compilation import (
+    initialize_fluent_defaults,
+    run_compilers,
+    select_grounder,
+)
 from aspplanners.common.temporal import DEFAULT_TIME_SCALE, split_durative_actions
 
 
@@ -154,6 +158,12 @@ class ABAEncoder:
 
         # Initial state: flexible boolean atoms are laid down at step 0, rigid
         # atoms are timeless, numeric fluents seed their value domain at step 0.
+        # Fill in the fluents the task left undefined first -- `initial_values`
+        # simply omits those, so an unstated numeric fluent would seed no value
+        # domain at all and every comparison reading it would be unsatisfiable.
+        # After the durations are resolved, so that the defaults (which stand for
+        # instances no reachable action uses) cannot contribute a 0 duration.
+        initialize_fluent_defaults(gp)
         self._init_true_flexible = []
         self._rigid_facts = []
         self._all_flexible_instances = set()

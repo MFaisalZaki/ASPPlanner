@@ -14,8 +14,10 @@ so importing this module (and registering both engines) works without it.
 from typing import Callable, IO, Optional
 
 import unified_planning as up
-from unified_planning.engines import PlanGenerationResult, PlanGenerationResultStatus
+from unified_planning.engines import (OptimalityGuarantee, PlanGenerationResult,
+                                      PlanGenerationResultStatus)
 from unified_planning.engines.results import LogMessage, LogLevel
+from unified_planning.model.problem_kind_versioning import LATEST_PROBLEM_KIND_VERSION
 
 from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.planner import PLASPPlanner
@@ -51,9 +53,13 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         # fluents, constant-delta increase/decrease/assign, linear comparisons).
         # Negative, quantified and disjunctive conditions need no compiling --
         # the encoding states all of them (see PLASPPlanner._check_compilationlist).
-        # Reals are accepted because PDDL (:functions ...) parse as real-typed;
-        # the encoder raises on non-integral constants.
-        from unified_planning.model.problem_kind_versioning import LATEST_PROBLEM_KIND_VERSION
+        # Reals are accepted because PDDL (:functions ...) parse as real-typed.
+        # A task stating fractional values is rescaled to whole ones before it is
+        # encoded (clingo terms are integers; see aspplanners.plasp.rescale),
+        # which the plan is unaffected by -- it is a sequence of actions. The one
+        # case that cannot be rescaled is a *bounded* numeric type, whose bound
+        # would not move with the values it bounds; that is raised at encoding
+        # time, since ProblemKind has no feature for the combination.
         kind = up.model.ProblemKind(version=LATEST_PROBLEM_KIND_VERSION)
         kind.set_problem_class('ACTION_BASED')
         kind.set_problem_type('SIMPLE_NUMERIC_PLANNING')
@@ -81,11 +87,36 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_expression_duration('INT_TYPE_DURATIONS')
         kind.set_expression_duration('REAL_TYPE_DURATIONS')
         kind.set_expression_duration('STATIC_FLUENTS_IN_DURATIONS')
+        # A fluent with no entry in the initial state gets a default laid down
+        # before the facts are emitted (bool -> false, numeric -> 0, i.e. PDDL's
+        # own closed-world reading), so a task that leaves some out is accepted;
+        # see common.compilation.initialize_fluent_defaults.
+        kind.set_initial_state('UNDEFINED_INITIAL_NUMERIC')
+        kind.set_initial_state('UNDEFINED_INITIAL_SYMBOLIC')
+        # Quality metrics are ACCEPTED, not optimised: the search stops at the
+        # first plan it finds and reports SOLVED_SATISFICING (see `satisfies`).
+        # Declaring them is what lets the engine take the IPC benchmarks, nearly
+        # all of which carry a `(:metric minimize (total-time))` or
+        # `(total-cost)` that has nothing to do with whether a plan exists.
+        # OVERSUBSCRIPTION is left out on purpose -- there the metric holds the
+        # soft goals, so ignoring it would change which plans count as solutions.
+        kind.set_quality_metrics('MAKESPAN')
+        kind.set_quality_metrics('ACTIONS_COST')
+        kind.set_quality_metrics('PLAN_LENGTH')
+        kind.set_quality_metrics('FINAL_VALUE')
+        kind.set_actions_cost_kind('STATIC_FLUENTS_IN_ACTIONS_COST')
+        kind.set_actions_cost_kind('FLUENTS_IN_ACTIONS_COST')
+        kind.set_actions_cost_kind('INT_NUMBERS_IN_ACTIONS_COST')
+        kind.set_actions_cost_kind('REAL_NUMBERS_IN_ACTIONS_COST')
         return kind
 
     @staticmethod
     def supports(problem_kind):
         return problem_kind <= UPPLASPPlanner.supported_kind()
+
+    @staticmethod
+    def satisfies(optimality_guarantee) -> bool:
+        return optimality_guarantee == OptimalityGuarantee.SATISFICING
 
     def _solve(self, problem: 'up.model.Problem',
                callback: Optional[Callable[['up.engines.PlanGenerationResult'], None]] = None,
@@ -139,7 +170,7 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         # condition into a static test on the actions that could break it, which
         # only exists for boolean ones) -- ProblemKind has no feature for that
         # distinction, so it is raised at encoding time instead.
-        kind = up.model.ProblemKind()
+        kind = up.model.ProblemKind(version=LATEST_PROBLEM_KIND_VERSION)
         kind.set_problem_class("ACTION_BASED")
         kind.set_problem_type("SIMPLE_NUMERIC_PLANNING")
         kind.set_typing("FLAT_TYPING")
@@ -161,11 +192,33 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_expression_duration("INT_TYPE_DURATIONS")
         kind.set_expression_duration("REAL_TYPE_DURATIONS")
         kind.set_expression_duration("STATIC_FLUENTS_IN_DURATIONS")
+        # Quality metrics are accepted but never optimised, on the same terms as
+        # the PLASP backend; see UPPLASPPlanner.supported_kind.
+        #
+        # UNDEFINED_INITIAL_NUMERIC / _SYMBOLIC are NOT declared here, though the
+        # PLASP backend takes them: this reduction is over ground STRIPS, and the
+        # grounder has to run before the encoder can fill the gaps in. No
+        # installed UP grounder accepts a task with an undefined initial value
+        # (up_grounder is the only one that takes the rest of this kind, and it
+        # declares neither), and filling them in first is not a way out either --
+        # it would give every unreachable ground action a 0-length duration.
+        kind.set_quality_metrics("MAKESPAN")
+        kind.set_quality_metrics("ACTIONS_COST")
+        kind.set_quality_metrics("PLAN_LENGTH")
+        kind.set_quality_metrics("FINAL_VALUE")
+        kind.set_actions_cost_kind("STATIC_FLUENTS_IN_ACTIONS_COST")
+        kind.set_actions_cost_kind("FLUENTS_IN_ACTIONS_COST")
+        kind.set_actions_cost_kind("INT_NUMBERS_IN_ACTIONS_COST")
+        kind.set_actions_cost_kind("REAL_NUMBERS_IN_ACTIONS_COST")
         return kind
 
     @staticmethod
     def supports(problem_kind):
         return problem_kind <= UPABAPlanner.supported_kind()
+
+    @staticmethod
+    def satisfies(optimality_guarantee) -> bool:
+        return optimality_guarantee == OptimalityGuarantee.SATISFICING
 
     def _solve(self, problem: "up.model.Problem",
                callback: Optional[Callable[["up.engines.PlanGenerationResult"], None]] = None,

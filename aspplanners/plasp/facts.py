@@ -7,9 +7,18 @@ This is a recreation of the PLASP tool's translation. Every builder is an
 and sets of facts deduplicate accordingly.
 """
 
+from fractions import Fraction
+from math import gcd
+
 from unified_planning.shortcuts import FNode, EffectKind
 
 from aspplanners.lp_io import ASPTerm
+
+# clingo terms are signed 32-bit and wrap around *silently*: `b(2147483648)`
+# grounds to `b(-2147483648)` and `X = 2147483647*2` to `-2`, with no warning.
+# A constant that does not fit would therefore yield a wrong plan rather than an
+# error, so everything that reaches the fact text is range-checked.
+CLINGO_INT_MAX = 2 ** 31 - 1
 
 
 def asp_name(name):
@@ -300,52 +309,134 @@ def _arg_term(arg):
                 ASPType(variable.type), 'quantified')
     raise TypeError(f"Unsupported fluent argument: {arg} of type {type(arg)}")
 
+def _in_clingo_range(value, context):
+    """`value` as a Python int, or a raise if clingo could not hold it."""
+    if isinstance(value, Fraction):
+        if value.denominator != 1:
+            raise NotImplementedError(
+                f"Non-integral numeric constant is not supported by the ASP "
+                f"encoding: {value} in {context}")
+        value = int(value)
+    if not -CLINGO_INT_MAX <= value <= CLINGO_INT_MAX:
+        raise NotImplementedError(
+            f"The numeric constant {value} in {context} does not fit in a clingo "
+            f"term: terms are signed 32-bit and wrap around silently, so the "
+            f"encoding would return a wrong plan rather than fail. State the task "
+            f"in units that keep its numbers below {CLINGO_INT_MAX}.")
+    return int(value)
+
+
 def _int_value(f):
     """The FNode's constant as a Python int; PDDL functions are real-typed in
-    UP, so integral reals are accepted (clingo terms are integers)."""
+    UP, so integral reals are accepted (clingo terms are integers).
+
+    Effect deltas and assignments change a fluent's *value*, so unlike the
+    constants inside a comparison they cannot be normalized away locally -- a
+    fractional one needs the whole task rescaled first (see
+    :mod:`aspplanners.plasp.rescale`), and reaching here without that is an
+    error rather than something to round.
+    """
     if f.is_int_constant():
-        return f.constant_value()
+        return _in_clingo_range(f.constant_value(), f)
     if f.is_real_constant():
         frac = f.constant_value()
         if frac.denominator != 1:
             raise NotImplementedError(
                 f"Non-integral numeric constant is not supported by the ASP encoding: {f}")
-        return int(frac)
+        return _in_clingo_range(int(frac), f)
     raise NotImplementedError(f"Expected a numeric constant, got: {f}")
 
-def _num_side(f):
-    """Normalize one side of a numeric comparison to (fluent_term|None, int_const).
 
-    Supports the linear shapes that survive UP's compilation of PDDL numeric
-    conditions: an int constant, a numeric fluent, and sums/differences of
-    one fluent with constants (e.g. ``(+ (economy ?t) 1)``). Anything richer
-    (two fluents on one side, multiplication) raises -- the PLASP encoding
-    keeps one variable per side for readability; use the ABA backend for
-    arithmetic that couples several fluents.
-    """
+def _constant_value(f):
+    """`f`'s value as an exact Fraction, or None when it is not a constant."""
     if f.is_int_constant() or f.is_real_constant():
-        return None, _int_value(f)
+        return Fraction(f.constant_value())
+    return None
+
+
+# A linear form is `(terms, constant)`: `terms` maps a fluent's rendered ASP term
+# to its `(ASPExpr, Fraction coefficient)` pair -- keyed by the rendering so the
+# same fluent occurring twice accumulates rather than duplicating -- and
+# `constant` is the additive rest. Coefficients stay exact rationals until
+# ASPNumComparison multiplies the whole comparison out to integers.
+
+def _lin_add(left, right):
+    terms = dict(left[0])
+    for key, (expr, coefficient) in right[0].items():
+        if key in terms:
+            terms[key] = (terms[key][0], terms[key][1] + coefficient)
+        else:
+            terms[key] = (expr, coefficient)
+    return terms, left[1] + right[1]
+
+
+def _lin_scale(form, factor):
+    return ({key: (expr, coefficient * factor)
+             for key, (expr, coefficient) in form[0].items()},
+            form[1] * factor)
+
+
+def _linear_form(f):
+    """Normalize a numeric expression to the linear form ``(terms, constant)``.
+
+    Covers everything PDDL's simple-numeric fragment can state that an integer
+    encoding represents exactly: constants, numeric fluents, sums, differences,
+    and products/quotients where at most one factor is non-constant -- so
+    ``(+ (x ?b) (y ?b))``, ``(- (y ?b) (x ?b))`` and ``(* 2 (x ?f))`` are all
+    linear forms rather than the special cases they used to be. What is left out
+    is genuinely non-linear: a product of two fluents, or division by one.
+    """
+    constant = _constant_value(f)
+    if constant is not None:
+        return {}, constant
     if f.is_fluent_exp():
-        return ASPExpr(f, None), 0
+        expr = ASPExpr(f, None)
+        return {str(expr): (expr, Fraction(1))}, Fraction(0)
     if f.is_plus():
-        var, const = None, 0
+        form = ({}, Fraction(0))
         for arg in f.args:
-            v, c = _num_side(arg)
-            const += c
-            if v is not None:
-                if var is not None:
-                    raise NotImplementedError(
-                        f"Numeric side with two fluents is not supported: {f}")
-                var = v
-        return var, const
+            form = _lin_add(form, _linear_form(arg))
+        return form
     if f.is_minus():
-        lv, lc = _num_side(f.args[0])
-        rv, rc = _num_side(f.args[1])
-        if rv is not None:
+        return _lin_add(_linear_form(f.args[0]),
+                        _lin_scale(_linear_form(f.args[1]), Fraction(-1)))
+    if f.is_times():
+        form = ({}, Fraction(1))
+        for arg in f.args:
+            factor = _linear_form(arg)
+            if not form[0]:
+                form = _lin_scale(factor, form[1])
+            elif not factor[0]:
+                form = _lin_scale(form, factor[1])
+            else:
+                raise NotImplementedError(
+                    f"A product of two numeric fluents is not linear and is not "
+                    f"supported by the ASP encoding: {f}")
+        return form
+    if f.is_div():
+        divisor = _linear_form(f.args[1])
+        if divisor[0]:
             raise NotImplementedError(
-                f"Subtracting a fluent is not supported: {f}")
-        return lv, lc - rc
+                f"Dividing by a numeric fluent is not linear and is not supported "
+                f"by the ASP encoding: {f}")
+        if divisor[1] == 0:
+            raise ZeroDivisionError(f"Division by zero in the numeric expression {f}.")
+        return _lin_scale(_linear_form(f.args[0]), Fraction(1) / divisor[1])
     raise NotImplementedError(f"Unsupported numeric term: {f} of type {f.node_type}")
+
+
+def _lcm(a, b):
+    return a * b // gcd(a, b)
+
+
+def _common_denominator(*forms):
+    """The least multiplier making every coefficient and constant of `forms` whole."""
+    denominator = 1
+    for terms, constant in forms:
+        for _expr, coefficient in terms.values():
+            denominator = _lcm(denominator, coefficient.denominator)
+        denominator = _lcm(denominator, constant.denominator)
+    return denominator
 
 
 class ASPBooleanType(ASPTerm):
@@ -456,15 +547,76 @@ class ASPEquality(ASPTerm):
         return f'{self.lhs} {op} {self.rhs}'
 
 
-class ASPNumComparison(ASPTerm):
-    """Arithmetic comparison ``lhs OP rhs`` with each side value(V)+C.
+class ASPLinearExpr(ASPTerm):
+    """One side of a numeric comparison: ``k1*V1 + k2*V2 + ... + C``.
 
-    Rendered as ``op, expr(V1,C1), expr(V2,C2)`` (wrapped by the caller into a
-    ``numPrecondition``/``numGoal`` fact); the encoding evaluates the sides
-    against ``numval/3``. A constant-only side uses the pseudo-variable
-    ``none`` (numval fixes it to 0, so the constant carries the value).
-    Each side is a single fluent plus a constant -- expressions coupling two
-    fluents (e.g. ``f + g``) raise; use the ABA backend for those.
+    Rendered as the term ``expr(Terms, C)``, which the encoding's ``numValue/3``
+    aggregate evaluates. Two shapes are kept from the single-fluent encoding this
+    generalises, so the facts a task used to produce are unchanged: a
+    constant-only side is ``expr(none, C)`` and a lone fluent with coefficient 1
+    is ``expr(V, C)``. Anything richer is ``expr(sum((V1,K1),(V2,K2),...), C)``.
+
+    The terms themselves travel separately, in :meth:`declaration_heads`:
+    ``numConst/2`` carries the additive constant and doubles as the expression's
+    declaration (so a constant-only side still gets a ``numValue``), and one
+    ``numTerm/3`` states each ``K*V``. Splitting them is what lets a side hold
+    any number of fluents without the fact's arity depending on how many.
+    """
+
+    def __init__(self, terms, constant):
+        # A zero coefficient contributes nothing; the rest are sorted by their
+        # rendering so the emitted fact text is stable from run to run.
+        self.terms = sorted(
+            ((expr, _in_clingo_range(coefficient, expr))
+             for expr, coefficient in terms if coefficient != 0),
+            key=lambda term: str(term[0]))
+        self.constant = _in_clingo_range(constant, 'a numeric comparison')
+
+    @property
+    def bindings(self):
+        """``has(_, type(...))`` atoms for the quantified variables in this side."""
+        return [binding for expr, _coefficient in self.terms for binding in expr.bindings]
+
+    def _terms_term(self):
+        if not self.terms:
+            return 'none'
+        if len(self.terms) == 1 and self.terms[0][1] == 1:
+            return str(self.terms[0][0])
+        return 'sum(' + ','.join(f'({str(expr)},{coefficient})'
+                                 for expr, coefficient in self.terms) + ')'
+
+    def __str__(self):
+        return f'expr({self._terms_term()}, {self.constant})'
+
+    def declaration_heads(self):
+        """The ``numConst``/``numTerm`` atoms declaring this side, bodies aside.
+
+        Owners attach their own rule body, so on a lifted task these instantiate
+        for exactly the parameter bindings their owner does. Two owners sharing
+        an expression derive the same atoms, which is the point: the aggregate
+        is then evaluated once for both.
+        """
+        return ([f"numConst({str(self)}, {self.constant})"]
+                + [f"numTerm({str(self)}, {coefficient}, {str(expr)})"
+                   for expr, coefficient in self.terms])
+
+
+class ASPNumComparison(ASPTerm):
+    """Arithmetic comparison ``lhs OP rhs`` between two linear expressions.
+
+    Rendered as ``op, expr(...), expr(...)`` (wrapped by the caller into a
+    ``numPrecondition``/``numGoal``/``numOverall``/``orDisjunctNum`` fact); the
+    encoding evaluates each side with its ``numValue/3`` aggregate and compares
+    the two. A constant-only side uses the pseudo-variable ``none``, whose
+    aggregate is empty, so the constant carries the value.
+
+    Both sides are multiplied through by the least common denominator of their
+    coefficients and constants. That is exact, and it preserves the comparison
+    because the factor is positive -- which is what lets a task state
+    ``(* 1/2 (x ?f))`` or compare against ``3/2`` even though clingo has only
+    integers. Note this handles fractions *within a comparison* only: a
+    fractional effect delta changes the fluent's value itself and needs the task
+    rescaled instead (see :mod:`aspplanners.plasp.rescale`).
     """
 
     # Each comparison's complement, so a negated one is encoded as the opposite
@@ -474,14 +626,24 @@ class ASPNumComparison(ASPTerm):
     def __init__(self, f, op):
         self.up_expr = f
         self.op = op
-        self.lhs = _num_side(f.args[0])
-        self.rhs = _num_side(f.args[1])
+        lhs, rhs = _linear_form(f.args[0]), _linear_form(f.args[1])
+        whole = _common_denominator(lhs, rhs)
+        self.lhs = _as_linear_expr(_lin_scale(lhs, whole))
+        self.rhs = _as_linear_expr(_lin_scale(rhs, whole))
 
     @property
     def bindings(self):
         """``has(_, type(...))`` atoms for quantified variables on either side."""
-        return [b for var, _const in (self.lhs, self.rhs)
-                if var is not None for b in var.bindings]
+        return self.lhs.bindings + self.rhs.bindings
+
+    def declaration_heads(self):
+        """The ``numConst``/``numTerm`` atoms declaring both sides."""
+        return self.lhs.declaration_heads() + self.rhs.declaration_heads()
+
+    def declaration_rules(self, body=()):
+        """:meth:`declaration_heads`, each stated under `body`."""
+        tail = f" :- {', '.join(body)}." if body else "."
+        return [f"{head}{tail}" for head in self.declaration_heads()]
 
     def negated(self):
         # not(a < b) == b <= a ; not(a <= b) == b < a ; not(a = b) == b != a
@@ -491,13 +653,14 @@ class ASPNumComparison(ASPTerm):
         neg.lhs, neg.rhs = self.rhs, self.lhs
         return neg
 
-    @staticmethod
-    def _side_str(side):
-        var, const = side
-        return f'expr({str(var) if var is not None else "none"}, {const})'
-
     def __str__(self):
-        return f'{self.op}, {self._side_str(self.lhs)}, {self._side_str(self.rhs)}'
+        return f'{self.op}, {str(self.lhs)}, {str(self.rhs)}'
+
+
+def _as_linear_expr(form):
+    terms, constant = form
+    return ASPLinearExpr([(expr, coefficient) for expr, coefficient in terms.values()],
+                         constant)
 
 
 class ASPGroundedFluent(ASPTerm):
@@ -572,6 +735,9 @@ def _or_facts(disjunction, gid, owner=None, body_prefix=(), scope_vars=(),
         for atom in disjunct.atoms:
             if isinstance(atom, ASPNumComparison):
                 facts.append(fact('DisjunctNum', [group, disjunct.id, str(atom)], disjunct_body))
+                # The sides are declared under the disjunct's own body, so a
+                # disjunct the grounder never declares never declares them either.
+                facts += atom.declaration_rules(_dedup(disjunct_body + atom.bindings))
             elif isinstance(atom, ASPExpr):
                 facts.append(fact('Disjunct', [group, disjunct.id, str(atom),
                                                f'value({str(atom)}, {atom.value})'],
@@ -633,8 +799,10 @@ class ASPAction(ASPTerm):
                     equality_atoms.append(str(variable))
                     continue
                 if isinstance(variable, ASPNumComparison):
+                    body = _dedup([f'action({self._head})'] + variable.bindings)
                     head = f'numPrecondition({self._head}, {str(variable)})'
-                    self._preconditions.append(f"{head} :- action({self._head}).")
+                    self._preconditions.append(f"{head} :- {', '.join(body)}.")
+                    self._preconditions += variable.declaration_rules(body)
                     continue
                 fluent_name = variable.up_expr._content.payload.name if isinstance(variable, ASPExpr) and variable.up_expr.is_fluent_exp() else None
                 if fluent_name is not None and variable.value == 'false':
@@ -821,7 +989,10 @@ class ASPDurativeAction(ASPTerm):
                 atoms = [e for a in atoms for e in (a if isinstance(a, list) else [a])]
             for atom in atoms:
                 if isinstance(atom, ASPNumComparison):
+                    # The comparison's sides are declared alongside it, guarded
+                    # by the same start-snap atom the over-all fact itself is.
                     self._overall.append(f"numOverall({self._head}, {str(atom)})")
+                    self._overall += atom.declaration_heads()
                 elif isinstance(atom, ASPExpr):
                     self._overall.append(
                         f"overall({self._head}, {str(atom)}, value({str(atom)}, {atom.value}))")
@@ -850,7 +1021,14 @@ class ASPDurativeAction(ASPTerm):
 class ASPStateVarVal(ASPTerm):
     def __init__(self, fluent, value):
         self.fluent = ASPGroundedFluent(fluent)
-        self.value  = str(value).lower()
+        # A numeric value goes through _int_value rather than str(): UP renders a
+        # real constant as its Fraction, and `value(V, 3/2)` is not a rational to
+        # clingo but *integer division*, which grounds to 1 -- a silently wrong
+        # initial state rather than an error. Booleans and objects keep the plain
+        # rendering; their str() is already the term the encoding expects.
+        self.value  = (str(_int_value(value))
+                       if value.is_int_constant() or value.is_real_constant()
+                       else str(value).lower())
 
     def __str__(self):
         return f"{str(self.fluent)}, value({str(self.fluent)}, {self.value})"
@@ -923,5 +1101,6 @@ class ASPNumGoal(ASPTerm):
         )
 
     def __str__(self):
-        return f"numGoal({str(self.cmp)})."
+        # A goal is not guarded by anything, so its sides are plain facts.
+        return '\n'.join([f"numGoal({str(self.cmp)})."] + self.cmp.declaration_rules())
 
