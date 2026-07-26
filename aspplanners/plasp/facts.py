@@ -935,6 +935,64 @@ class ASPAction(ASPTerm):
         return '\n'.join(_sig)
 
 
+def _duration_arithmetic(expression, da, counter=None, lookups=None):
+    """``(numerator, denominator, lookups)`` for a deferred duration expression.
+
+    The value is carried as an exact rational of two clingo integer terms rather
+    than one divided term, because clingo's ``/`` truncates and a duration like
+    ``(/ (distance ?y ?z) (speed ?x))`` has to survive the intermediate step. The
+    caller divides once, at the end.
+
+    `lookups` collects one ``initialState(...)`` body atom per fluent occurrence,
+    binding it to a fresh ASP variable; that is what resolves the value per
+    parameter binding at grounding time, so the task never has to be ground.
+    """
+    counter = [0] if counter is None else counter
+    lookups = [] if lookups is None else lookups
+
+    if expression.is_int_constant() or expression.is_real_constant():
+        value = Fraction(expression.constant_value())
+        return str(value.numerator), str(value.denominator), lookups
+
+    if expression.is_fluent_exp():
+        fluent = parseexpr(expression, None)
+        variable = f"RAWDUR{counter[0]}"
+        counter[0] += 1
+        lookups.append(
+            f"initialState({str(fluent)}, value({str(fluent)}, {variable}))")
+        return variable, "1", lookups
+
+    operands = [_duration_arithmetic(arg, da, counter, lookups)
+                for arg in expression.args]
+    numerators = [n for n, _d, _l in operands]
+    denominators = [d for _n, d, _l in operands]
+
+    if expression.is_times():
+        return (' * '.join(f"({n})" for n in numerators),
+                ' * '.join(f"({d})" for d in denominators), lookups)
+    if expression.is_div():
+        # a/b = (na*db) / (da*nb); with more than two operands this folds left,
+        # which is the order UP itself reads the expression in.
+        num, den = numerators[0], denominators[0]
+        for n, d in zip(numerators[1:], denominators[1:]):
+            num, den = f"({num}) * ({d})", f"({den}) * ({n})"
+        return num, den, lookups
+    if expression.is_plus() or expression.is_minus():
+        sign = ' + ' if expression.is_plus() else ' - '
+        # Over a common denominator, so the sum stays exact.
+        common = ' * '.join(f"({d})" for d in denominators)
+        terms = []
+        for index, (n, _d) in enumerate(zip(numerators, denominators)):
+            others = [f"({d})" for position, d in enumerate(denominators) if position != index]
+            terms.append(f"({n})" + (' * ' + ' * '.join(others) if others else ''))
+        return sign.join(terms), common, lookups
+
+    raise NotImplementedError(
+        f"Duration {expression} of durative action {da.name!r} is not arithmetic over "
+        "static fluents and constants; the encoding evaluates a duration by looking its "
+        "fluents up in the initial state.")
+
+
 class ASPDurativeAction(ASPTerm):
     """The temporal facts tying a durative action to its two snap actions.
 
@@ -975,11 +1033,21 @@ class ASPDurativeAction(ASPTerm):
             lower, upper = duration_bounds
             self._duration = str(lower) if lower == upper else f"{lower}..{upper}"
         else:
-            fluent = parseexpr(duration_bounds.fluent, None)
-            self._duration = (f"RAWDURATION * {duration_bounds.multiplier} "
-                              f"/ {duration_bounds.divisor}")
-            self._duration_body = (
-                f"initialState({str(fluent)}, value({str(fluent)}, RAWDURATION))")
+            numerator, denominator, lookups = _duration_arithmetic(
+                duration_bounds.expression, da)
+            # Kept as a single rational and divided once, because clingo's `/`
+            # truncates: `(distance / speed) * mult / div` would floor 5/2 to 2
+            # before the scaling ever ran. Dividing only at the end is exact,
+            # since time_unit was built from every value the expression can take.
+            term = (f"({numerator}) * {duration_bounds.multiplier} "
+                    f"/ (({denominator}) * {duration_bounds.divisor})")
+            # DURATION > 0 is what keeps a binding that computes no real duration
+            # -- depots' `(distance ?y ?y)` of 0 -- from becoming an action: with
+            # no durationValue fact the `1 {remaining(DA, D, t)} 1 :- starts(DA, t)`
+            # choice has nothing to pick, so that durative action can never start.
+            self._duration = "DURATION"
+            self._duration_body = ', '.join(
+                lookups + [f"DURATION = {term}", "DURATION > 0"])
 
         self._overall = []
         for condition in overall_conditions:

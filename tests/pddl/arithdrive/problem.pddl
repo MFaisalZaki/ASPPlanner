@@ -1,0 +1,10 @@
+;; speed 2 over distances 5 and 3, so the two legs last exactly 2.5 and 1.5.
+(define (problem drive-two-legs)
+  (:domain arithdrive)
+  (:objects l1 l2 l3 - location  car - vehicle)
+  (:init (at car l1)
+         (link l1 l2) (link l2 l3)
+         (= (speed car) 2)
+         (= (distance l1 l2) 5)
+         (= (distance l2 l3) 3))
+  (:goal (and (at car l3))))

@@ -591,3 +591,161 @@ def test_a_temporal_task_with_fractional_values_still_schedules():
     assert planner.status == Status.SOLVED_SATISFICING, planner.logs
     assert any(ai.action.name == "burn" for _s, ai, _d in plan.timed_actions)
     assert_schedule_is_over_original_problem(task, plan)
+
+
+# ---------------------------------------------------------------------------
+# State-independent over-all conditions
+# ---------------------------------------------------------------------------
+
+def parameter_guard_problem(goal_pair):
+    """`link(?a, ?b)` carries `(over all (not (= ?a ?b)))`, satellite's guard.
+
+    Nothing an action does can change whether two parameters are equal, so the
+    condition is settled by the binding rather than being an invariant to watch.
+    Asking for `linked(x, x)` therefore has no plan, and `linked(x, y)` has one.
+    """
+    from unified_planning.shortcuts import BoolType, Not, Equals, Object, UserType
+
+    Node = UserType("Node")
+    linked = Fluent("linked", BoolType(), a=Node, b=Node)
+
+    link = DurativeAction("link", a=Node, b=Node)
+    link.set_fixed_duration(2)
+    link.add_condition(OpenTimeInterval(StartTiming(), EndTiming()),
+                       Not(Equals(link.parameter("a"), link.parameter("b"))))
+    link.add_effect(EndTiming(), linked(link.parameter("a"), link.parameter("b")), True)
+
+    problem = Problem("parameter_guard")
+    problem.add_fluent(linked, default_initial_value=False)
+    problem.add_objects([Object("x", Node), Object("y", Node)])
+    problem.add_action(link)
+    problem.add_goal(linked(problem.object(goal_pair[0]), problem.object(goal_pair[1])))
+    return problem
+
+
+@backends
+def test_a_parameter_only_over_all_condition_rules_out_the_binding(backend, make_planner):
+    """`(over all (not (= ?a ?b)))` must still forbid the equal binding."""
+    planner = make_planner(parameter_guard_problem(("x", "x")))
+    planner.plan(max_horizon=4)
+    assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, (
+        "link(x, x) was scheduled even though its over-all condition forbids it"
+    )
+
+
+@backends
+def test_a_parameter_only_over_all_condition_still_allows_the_others(backend, make_planner):
+    problem = parameter_guard_problem(("x", "y"))
+    planner = make_planner(problem)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert_schedule_is_over_original_problem(problem, plan)
+    assert [ai.action.name for _s, ai, _d in plan.timed_actions] == ["link"]
+
+
+def test_a_parameter_only_over_all_condition_is_folded_into_the_signature():
+    """It should not reach the encoding as an `overall/3` fact at all: folding it
+    into the action signature is what keeps the ruled-out bindings out of the
+    grounding, which an invariant fact would not do."""
+    planner = PLASPPlanner(parameter_guard_problem(("x", "y")))
+    lines = planner.compiled_task.fact_lines
+    assert not any(line.startswith("overall(") for line in lines), (
+        f"expected no overall/3 fact, got {[l for l in lines if l.startswith('overall(')]}"
+    )
+    assert any("!=" in line and line.startswith("action(") for line in lines), (
+        "the parameter test was dropped instead of being folded into the signature"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Durations that are arithmetic over static fluents
+# ---------------------------------------------------------------------------
+
+@backends
+def test_an_arithmetic_duration_is_evaluated_exactly(backend, make_planner):
+    """`(/ (distance ?a ?b) (speed ?v))` with distance 5 and speed 2 lasts 2.5.
+
+    Truncating the division anywhere -- and clingo's `/` does truncate -- turns
+    that leg into 2, which still schedules and still validates against a
+    validator asked the same wrong question, so the durations are checked here
+    against the arithmetic itself.
+    """
+    problem = parse("arithdrive")
+    planner = make_planner(problem)
+    plan = planner.plan(max_horizon=8)
+
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert_schedule_is_over_original_problem(problem, plan)
+    legs = {tuple(str(p) for p in ai.actual_parameters): duration
+            for _s, ai, duration in plan.timed_actions}
+    assert legs[("car", "l1", "l2")] == Fraction(5, 2), legs
+    assert legs[("car", "l2", "l3")] == Fraction(3, 2), legs
+
+
+@backends
+def test_a_zero_length_leg_is_not_an_action(backend, make_planner):
+    """A binding whose arithmetic duration comes out 0 has no duration at all,
+    so it cannot be scheduled even where every other precondition holds."""
+    planner = make_planner(parse("arithdrive", "problem-zero-leg.pddl"))
+    planner.plan(max_horizon=8)
+    assert planner.status == Status.UNSOLVABLE_INCOMPLETELY, (
+        "a zero-duration leg was scheduled; the happening encoding needs every "
+        "action to span a positive amount of time"
+    )
+
+
+def test_a_zero_length_leg_does_not_sink_the_whole_task():
+    """The zero only takes its own binding out. Other actions keep their
+    durations and the task still plans -- a task-level rejection would have made
+    depots (which states `(distance ?y ?y)` as 0) unencodable."""
+    problem = parse("arithdrive")
+    problem.set_initial_value(
+        problem.fluent("distance")(problem.object("l1"), problem.object("l1")), 0)
+    planner = PLASPPlanner(problem)
+    plan = planner.plan(max_horizon=8)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    legs = {tuple(str(p) for p in ai.actual_parameters): d
+            for _s, ai, d in plan.timed_actions}
+    assert legs[("car", "l1", "l2")] == Fraction(5, 2), legs
+
+
+def test_an_arithmetic_duration_survives_numeric_rescaling():
+    """A fractional value elsewhere in the task rescales the numbers, and the
+    fluents inside a duration have to be left out of that.
+
+    `dist(l1) + 1` is 6. Scaling `dist` to 10 alongside everything else would
+    make it 11 -- not even a multiple of the right answer, because the constant
+    does not scale with it. A bare-fluent duration was already exempt; one
+    nested in an expression is not a fluent expression at all, so it had to be
+    looked for at depth.
+    """
+    from unified_planning.shortcuts import Object, Plus, RealType, UserType
+
+    Loc = UserType("Loc")
+    dist = Fluent("dist", RealType(), l=Loc)      # static: never an effect
+    charge = Fluent("charge", RealType())
+    arrived = Fluent("arrived", l=Loc)
+
+    go = DurativeAction("go", l=Loc)
+    go.set_fixed_duration(Plus(dist(go.parameter("l")), 1))
+    go.add_effect(EndTiming(), arrived(go.parameter("l")), True)
+    go.add_increase_effect(EndTiming(), charge, Fraction(1, 2))   # forces rescaling
+
+    problem = Problem("rescaled_arithmetic_duration")
+    problem.add_fluent(dist, default_initial_value=0)
+    problem.add_fluent(charge, default_initial_value=0)
+    problem.add_fluent(arrived, default_initial_value=False)
+    problem.add_object(Object("l1", Loc))
+    problem.set_initial_value(dist(problem.object("l1")), 5)
+    problem.add_action(go)
+    problem.add_goal(arrived(problem.object("l1")))
+
+    planner = PLASPPlanner(problem)
+    assert planner.compiled_task.numeric_scale > 1, (
+        "the fractional increase should have rescaled the task; without that this "
+        "test would pass whether or not durations are exempt"
+    )
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    (_start, _action, duration), = plan.timed_actions
+    assert duration == 6, f"dist(l1) + 1 should last 6, got {duration}"

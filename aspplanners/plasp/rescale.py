@@ -41,6 +41,13 @@ from aspplanners.plasp.facts import _is_numeric_fnode
 MAX_NUMERIC_SCALE = 10 ** 6
 
 
+def _fluent_names(expression):
+    """Every fluent name `expression` reads, at any depth."""
+    if expression.is_fluent_exp():
+        return {expression.fluent().name}
+    return set().union(set(), *(_fluent_names(arg) for arg in expression.args))
+
+
 def scale_numeric_constants(task) -> int:
     """Multiply `task`'s numeric values by the least factor making them whole.
 
@@ -51,10 +58,13 @@ def scale_numeric_constants(task) -> int:
     # A fluent read as a durative action's duration keeps the task's own units:
     # the encoding reads its value straight out of the initialState fact and
     # scales it by the time unit itself (see common.temporal.FluentDuration).
-    duration_fluents = {bound.fluent().name
+    # Nested occurrences count too -- depots' `(/ (distance ?y ?z) (speed ?x))`
+    # is not itself a fluent expression, but scaling either fluent inside it
+    # would scale the duration the encoding then reads.
+    duration_fluents = {name
                         for da in durative_actions(task)
                         for bound in (da.duration.lower, da.duration.upper)
-                        if bound.is_fluent_exp()}
+                        for name in _fluent_names(bound)}
 
     denominators, scaled_fluents = _walk(task, None, duration_fluents)
     scale = 1
