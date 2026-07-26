@@ -122,9 +122,13 @@ def solve(args) -> int:
         from unified_planning.io import PDDLReader
         import aspplanners  # noqa: F401  -- registers PLASPPlanner and ABAPlanner
 
+        environment = up_shortcuts.get_environment()
         # Every engine UP touches prints a credits block; across a sweep that is
         # tens of thousands of lines of slurm log saying the same thing.
-        up_shortcuts.get_environment().credits_stream = None
+        environment.credits_stream = None
+        # Some IPC instances reuse one name across categories (an object named
+        # like a domain predicate, say); UP rejects those by default.
+        environment.error_used_name = False
 
         parse_start = time.monotonic()
         problem = PDDLReader().parse_problem(args.domain, args.problem)
