@@ -173,7 +173,40 @@ rules = [t for t in terms if isinstance(t, ASPRule)]
 dump_lp(terms, "normalized.lp")   # also accepts fact-builder terms and plain strings
 ```
 
-The encoding is split into `#program base / step(t) / check(t)` parts; ground `base` + `step(1..h)` + `check(h)` and set the external `query(h)` to true to solve at horizon `h`. Its temporal layer sits at the bottom of [sequential-horizon.lp](aspplanners/plasp/encodings/sequential-horizon.lp), annotated with the SMTPlan constraint it mirrors, and is inert on a task whose facts declare no `durativeAction`.
+The encoding is split into `#program base / step(t) / check(t)` parts; ground `base` + `step(1..h)` + `check(h)` and set the external `query(h)` to true to solve at horizon `h`.
+
+#### Encoding layers
+
+The encoding is one `.lp` file per feature, under [encodings/seq/](aspplanners/plasp/encodings/seq/):
+
+| Layer | File | Covers |
+|---|---|---|
+| `core` | [core.lp](aspplanners/plasp/encodings/seq/core.lp) | multi-valued STRIPS over the horizon: the action choice, preconditions, (conditional) effects, inertia, the goal test |
+| `numeric` | [numeric.lp](aspplanners/plasp/encodings/seq/numeric.lp) | linear numeric fluents, comparisons, effects and goals |
+| `disjunctive` | [disjunctive.lp](aspplanners/plasp/encodings/seq/disjunctive.lp) | disjunctive, existential and nested conditions and goals |
+| `temporal` | [temporal.lp](aspplanners/plasp/encodings/seq/temporal.lp) | PDDL 2.1 durative actions as SMTPlan-style happenings, annotated with the SMTPlan constraint each rule mirrors |
+
+clingo merges `#program` parts of the same name across the files it is given, so the program for a task is the concatenation of the layers it needs, loaded in dependency order (`core` first — it declares the program parts and the `query(t)` external). Layers reference each other's predicates only through `#defined`, which is what lets one be left out without breaking the rest.
+
+**Layers are chosen per task, and you do not normally pick them.** `encoder_type="seq"` infers them from the facts the encoder emitted, widened by what the compiled problem's `ProblemKind` reports:
+
+```python
+planner = PLASPPlanner(problem, encoder_type="seq")
+planner.layers          # ('core', 'numeric', 'temporal')
+planner.encoding_paths  # the .lp files that will be loaded, in load order
+```
+
+The emitted facts are the authority — they describe the task *as encoded*, after the compilation pipeline, TIM inference, numeric rescaling and the durative split. `ProblemKind` is a second opinion only: it reports declared features rather than the vocabulary the encoding consumes, and the two need not agree (a durative action whose duration reads a fluent produces numeric facts on a problem whose kind has no numeric feature at all). Where they differ, the union wins — an unneeded layer grounds to nothing, while a missing one would be silently ignored.
+
+You can name the layers instead, which is useful for benchmarking a layer's grounding cost or for pinning an encoding across a run:
+
+```python
+planner = PLASPPlanner(problem, encoder_type="seq+numeric+temporal")
+```
+
+An explicit set is still closed under each layer's requirements and still checked for coverage: naming too few layers raises at construction rather than producing a program that quietly ignores half the task. The same string works as the UP engine's `encoding` parameter (`params={"encoding": "seq+numeric"}`).
+
+Adding a feature — PDDL 3 trajectory constraints, say — means a new `.lp` in `encodings/seq/` plus one `Layer(...)` entry in [layers.py](aspplanners/plasp/layers.py) naming the fact predicates only it reads.
 
 #### The ABA backend directly
 

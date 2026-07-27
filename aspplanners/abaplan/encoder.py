@@ -19,8 +19,8 @@ expensively, so those are rejected. The PLASP backend handles such expressions
 with native ``#sum`` arithmetic instead.
 
 Temporal planning over PDDL 2.1 durative actions is supported the same way, and
-is the ABA counterpart of the temporal layer of
-``aspplanners/plasp/encodings/sequential-horizon.lp``: a step is a *happening*,
+is the ABA counterpart of
+``aspplanners/plasp/encodings/seq/temporal.lp``: a step is a *happening*,
 a durative action is the pair of snap actions it decomposes into
 (:mod:`aspplanners.common.temporal`), and SMTPlan's ``run`` and ``dur``
 variables become the ``run_...`` and ``rem_...`` atoms below -- the latter

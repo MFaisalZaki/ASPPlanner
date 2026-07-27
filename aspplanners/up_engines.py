@@ -77,7 +77,7 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_effects_kind('INCREASE_EFFECTS')
         kind.set_effects_kind('DECREASE_EFFECTS')
         # Temporal planning over the PDDL 2.1 durative-action fragment, encoded
-        # as SMTPlan's happenings (see encodings/sequential-horizon.lp). Left
+        # as SMTPlan's happenings (see encodings/seq/temporal.lp). Left
         # out on purpose: SELF_OVERLAPPING (a durative action may not overlap
         # itself), INTERMEDIATE_CONDITIONS_AND_EFFECTS (conditions and effects
         # sit at the two snap actions only), TIMED_EFFECTS/TIMED_GOALS, and

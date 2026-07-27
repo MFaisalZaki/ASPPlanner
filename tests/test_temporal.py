@@ -269,7 +269,8 @@ def _ground_actions(planner, horizon):
     import clingo
 
     control = clingo.Control(["-n", "1"])
-    control.load(planner.encoding_path)
+    for path in planner.encoding_paths:
+        control.load(path)
     control.add("base", [], planner.task_facts)
     control.ground([("base", [])])
     actions = {str(a.symbol) for a in control.symbolic_atoms.by_signature("action", 1)}
