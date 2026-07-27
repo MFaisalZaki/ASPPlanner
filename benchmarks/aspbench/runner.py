@@ -168,6 +168,13 @@ def solve(args) -> int:
     except MemoryError:
         result['status'] = MEMOUT
         result['logs'].append(f'MemoryError under a {args.memory_limit}MB limit.')
+    except NotImplementedError as error:
+        # The kind-level `supports` check passed, but the encoder met a shape
+        # ProblemKind cannot express -- a non-linear expression, a fractional
+        # effect coefficient, a bounded type that cannot be rescaled. That is
+        # the task sitting outside the engine's fragment, not a crash.
+        result['status'] = UNSUPPORTED
+        result['logs'].append(f'{engine} cannot encode this task: {error}')
     except Exception as error:                              # noqa: BLE001 -- reported, not swallowed
         result['status'] = ERROR
         result['error'] = {'type': type(error).__name__, 'message': str(error)}

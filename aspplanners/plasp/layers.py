@@ -120,7 +120,8 @@ SEQ_LAYERS: Tuple[Layer, ...] = (
         requires=('core',),
         owns=frozenset({
             'numVariable', 'numConst', 'numTerm', 'numPrecondition',
-            'numEffect', 'numAssign', 'numGoal',
+            'numEffect', 'numAssign', 'numEffectExpr', 'numAssignExpr',
+            'numGoal',
         }),
         kind_features=(
             'has_int_fluents', 'has_real_fluents', 'has_numeric_fluents',

@@ -563,14 +563,14 @@ class ASPLinearExpr(ASPTerm):
     any number of fluents without the fact's arity depending on how many.
     """
 
-    def __init__(self, terms, constant):
+    def __init__(self, terms, constant, context='a numeric comparison'):
         # A zero coefficient contributes nothing; the rest are sorted by their
         # rendering so the emitted fact text is stable from run to run.
         self.terms = sorted(
             ((expr, _in_clingo_range(coefficient, expr))
              for expr, coefficient in terms if coefficient != 0),
             key=lambda term: str(term[0]))
-        self.constant = _in_clingo_range(constant, 'a numeric comparison')
+        self.constant = _in_clingo_range(constant, context)
 
     @property
     def bindings(self):
@@ -599,6 +599,11 @@ class ASPLinearExpr(ASPTerm):
         return ([f"numConst({str(self)}, {self.constant})"]
                 + [f"numTerm({str(self)}, {coefficient}, {str(expr)})"
                    for expr, coefficient in self.terms])
+
+    def declaration_rules(self, body=()):
+        """:meth:`declaration_heads`, each stated under `body`."""
+        tail = f" :- {', '.join(body)}." if body else "."
+        return [f"{head}{tail}" for head in self.declaration_heads()]
 
 
 class ASPNumComparison(ASPTerm):
@@ -642,8 +647,7 @@ class ASPNumComparison(ASPTerm):
 
     def declaration_rules(self, body=()):
         """:meth:`declaration_heads`, each stated under `body`."""
-        tail = f" :- {', '.join(body)}." if body else "."
-        return [f"{head}{tail}" for head in self.declaration_heads()]
+        return self.lhs.declaration_rules(body) + self.rhs.declaration_rules(body)
 
     def negated(self):
         # not(a < b) == b <= a ; not(a <= b) == b < a ; not(a = b) == b != a
@@ -657,10 +661,36 @@ class ASPNumComparison(ASPTerm):
         return f'{self.op}, {str(self.lhs)}, {str(self.rhs)}'
 
 
-def _as_linear_expr(form):
+def _as_linear_expr(form, context='a numeric comparison'):
     terms, constant = form
     return ASPLinearExpr([(expr, coefficient) for expr, coefficient in terms.values()],
-                         constant)
+                         constant, context)
+
+
+def _reads_fluents(form):
+    """Does this linear form read any fluent (with a surviving coefficient)?"""
+    return any(coefficient != 0 for _expr, coefficient in form[0].values())
+
+
+def _effect_expr(form, term):
+    """A numeric effect's delta or assigned value as a linear expression.
+
+    A comparison clears a fractional coefficient by multiplying the whole
+    comparison through, which preserves it exactly (see ASPNumComparison). An
+    effect has no such move: multiplying it through would change the fluent's
+    value, and the task-wide rescale scales values, not coefficients, so
+    ``(increase (x) (/ (y) 2))`` stays fractional under any factor. Rejected
+    here, ahead of ASPLinearExpr's own range check, for the sharper message.
+    """
+    for expr, coefficient in form[0].values():
+        if coefficient != 0 and coefficient.denominator != 1:
+            raise NotImplementedError(
+                f"The numeric effect on {term} reads {expr} with the fractional "
+                f"coefficient {coefficient}, which no rescaling of the task can "
+                f"make whole (scaling moves the values, not the coefficients); "
+                f"the ASP encoding cannot state it. State the task in units "
+                f"that make the coefficient integral.")
+    return _as_linear_expr(form, context=f'the numeric effect on {term}')
 
 
 class ASPGroundedFluent(ASPTerm):
@@ -831,17 +861,33 @@ class ASPAction(ASPTerm):
 
         # iterate over the unconditional effects.
         self._postconditions = []
-        num_deltas = {}   # fluent term -> summed constant delta
+        # A fluent's increase/decrease deltas accumulate as one linear form, so
+        # several effects on the same fluent are a single update. A form with no
+        # fluent terms stays the numEffect/numAssign integer it always was; one
+        # that reads fluents becomes a numEffectExpr/numAssignExpr, whose
+        # expression the encoding evaluates against the step before.
+        num_deltas = {}   # fluent term -> summed linear-form delta
         for eff in a.unconditional_effects:
             if eff.kind in (EffectKind.INCREASE, EffectKind.DECREASE):
                 term = str(parseexpr(eff.fluent))
-                sign = 1 if eff.kind == EffectKind.INCREASE else -1
-                num_deltas[term] = num_deltas.get(term, 0) + sign * _int_value(eff.value)
+                form = _linear_form(eff.value)
+                if eff.kind == EffectKind.DECREASE:
+                    form = _lin_scale(form, Fraction(-1))
+                num_deltas[term] = _lin_add(num_deltas[term], form) if term in num_deltas else form
                 continue
             if eff.kind == EffectKind.ASSIGN and not eff.fluent.type.is_bool_type():
                 term = str(parseexpr(eff.fluent))
-                head = f"numAssign({self._head}, {term}, {_int_value(eff.value)})"
-                self._postconditions.append(f"{head} :- action({self._head}).")
+                form = _linear_form(eff.value)
+                if _reads_fluents(form):
+                    expr = _effect_expr(form, term)
+                    body = _dedup([f'action({self._head})'] + expr.bindings)
+                    head = f"numAssignExpr({self._head}, {term}, {str(expr)})"
+                    self._postconditions.append(f"{head} :- {', '.join(body)}.")
+                    self._postconditions += expr.declaration_rules(body)
+                else:
+                    value = _in_clingo_range(form[1], f'the numeric effect on {term}')
+                    head = f"numAssign({self._head}, {term}, {value})"
+                    self._postconditions.append(f"{head} :- action({self._head}).")
                 continue
             variable = parseexpr(eff.fluent)
             value    = str(eff.value).lower()
@@ -850,7 +896,15 @@ class ASPAction(ASPTerm):
             # condition does; the caused/3 rule then fires once per binding.
             body = ', '.join([f'action({self._head})'] + list(variable.bindings))
             self._postconditions.append(f"{head} :- {body}.")
-        for term, delta in num_deltas.items():
+        for term, form in num_deltas.items():
+            if _reads_fluents(form):
+                expr = _effect_expr(form, term)
+                body = _dedup([f'action({self._head})'] + expr.bindings)
+                head = f"numEffectExpr({self._head}, {term}, {str(expr)})"
+                self._postconditions.append(f"{head} :- {', '.join(body)}.")
+                self._postconditions += expr.declaration_rules(body)
+                continue
+            delta = _in_clingo_range(form[1], f'the numeric effect on {term}')
             if delta == 0:
                 continue
             head = f"numEffect({self._head}, {term}, {delta})"

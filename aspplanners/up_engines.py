@@ -49,20 +49,30 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
 
     @staticmethod
     def supported_kind():
-        # Classical planning plus SIMPLE numeric planning (integer-valued
-        # fluents, constant-delta increase/decrease/assign, linear comparisons).
-        # Negative, quantified and disjunctive conditions need no compiling --
-        # the encoding states all of them (see PLASPPlanner._check_compilationlist).
+        # Classical planning plus LINEAR numeric planning: integer/real-valued
+        # fluents, linear comparisons, and increase/decrease/assign effects
+        # whose value is a linear expression over the state -- a constant, or
+        # `k1*V1 + ... + C` evaluated against the step before (numEffectExpr /
+        # numAssignExpr in encodings/seq/numeric.lp). Negative, quantified and
+        # disjunctive conditions need no compiling -- the encoding states all
+        # of them (see PLASPPlanner._check_compilationlist).
         # Reals are accepted because PDDL (:functions ...) parse as real-typed.
         # A task stating fractional values is rescaled to whole ones before it is
         # encoded (clingo terms are integers; see aspplanners.plasp.rescale),
-        # which the plan is unaffected by -- it is a sequence of actions. The one
-        # case that cannot be rescaled is a *bounded* numeric type, whose bound
-        # would not move with the values it bounds; that is raised at encoding
-        # time, since ProblemKind has no feature for the combination.
+        # which the plan is unaffected by -- it is a sequence of actions.
+        # GENERAL_NUMERIC_PLANNING is declared because an effect that reads a
+        # fluent already puts a task's kind there; the feature has no
+        # linear/non-linear split, so the shapes past linear are raised at
+        # encoding time instead, like everything else ProblemKind cannot say:
+        # a product of two fluents or a division by one (facts._linear_form), a
+        # fractional coefficient in an effect (facts._effect_expr, since scaling
+        # moves values, not coefficients), and a *bounded* numeric type on a
+        # task that needs rescaling, whose bound would not move with the values
+        # it bounds.
         kind = up.model.ProblemKind(version=LATEST_PROBLEM_KIND_VERSION)
         kind.set_problem_class('ACTION_BASED')
         kind.set_problem_type('SIMPLE_NUMERIC_PLANNING')
+        kind.set_problem_type('GENERAL_NUMERIC_PLANNING')
         kind.set_typing('FLAT_TYPING')
         kind.set_typing('HIERARCHICAL_TYPING')
         kind.set_numbers('BOUNDED_TYPES')
@@ -76,6 +86,8 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_effects_kind('CONDITIONAL_EFFECTS')
         kind.set_effects_kind('INCREASE_EFFECTS')
         kind.set_effects_kind('DECREASE_EFFECTS')
+        kind.set_effects_kind('STATIC_FLUENTS_IN_NUMERIC_ASSIGNMENTS')
+        kind.set_effects_kind('FLUENTS_IN_NUMERIC_ASSIGNMENTS')
         # Temporal planning over the PDDL 2.1 durative-action fragment, encoded
         # as SMTPlan's happenings (see encodings/seq/temporal.lp). Left
         # out on purpose: SELF_OVERLAPPING (a durative action may not overlap

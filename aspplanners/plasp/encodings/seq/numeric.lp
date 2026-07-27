@@ -2,7 +2,7 @@
 % Sequential horizon encoding -- NUMERIC layer.
 %
 %   owns:     numVariable/1 numConst/2 numTerm/3 numPrecondition/4 numEffect/3
-%             numAssign/3 numGoal/3
+%             numAssign/3 numEffectExpr/3 numAssignExpr/3 numGoal/3
 %   requires: core (holds/3, occurs/2, the caused/modified inertia)
 %
 % Numeric fluents ride on core's holds/3 chain -- a numeric variable's value is
@@ -29,6 +29,8 @@
 #defined numPrecondition/4.
 #defined numEffect/3.
 #defined numAssign/3.
+#defined numEffectExpr/3.
+#defined numAssignExpr/3.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Initial state
@@ -63,6 +65,13 @@ numValue(E, S + C, 0) :- numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V),
 % core's caused/3, so core's inertia and modified/2 handle them like any effect.
 caused(V, value(V, X + D), t) :- occurs(A, t), numEffect(A, V, D), holds(V, value(V, X), t - 1).
 caused(V, value(V, K), t) :- occurs(A, t), numAssign(A, V, K).
+
+% Effects whose delta or assigned value is itself a linear expression over the
+% state: the expression is evaluated at t-1 through numValue/3, exactly as a
+% precondition's sides are, and applied at t. Kept apart from the constant
+% forms so a task without them grounds exactly what it did before.
+caused(V, value(V, X + D), t) :- occurs(A, t), numEffectExpr(A, V, E), holds(V, value(V, X), t - 1), numValue(E, D, t - 1).
+caused(V, value(V, D), t) :- occurs(A, t), numAssignExpr(A, V, E), numValue(E, D, t - 1).
 
 numval(V, X, t) :- holds(V, value(V, X), t), numVariable(V).
 numValue(E, S + C, t) :- numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V), numval(V, X, t) }.
