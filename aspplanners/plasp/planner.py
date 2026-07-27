@@ -1,4 +1,3 @@
-import os
 import time
 from fractions import Fraction
 from typing import List, Optional, Tuple
@@ -11,14 +10,14 @@ from unified_planning.plans import SequentialPlan, TimeTriggeredPlan, ActionInst
 from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.facts import asp_name
+from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
 
-_ENCODINGS_DIR = os.path.join(os.path.dirname(__file__), 'encodings')
-
-# encoder type -> (encoder class, clingo encoding file)
+# encoding family -> the encoder that produces its facts. Which *layers* of the
+# family get loaded is decided per task; see aspplanners.plasp.layers.
 ENCODERS = {
-    'seq': (PLASPEncoder, os.path.join(_ENCODINGS_DIR, 'sequential-horizon.lp')),
+    'seq': PLASPEncoder,
 }
 
 
@@ -28,27 +27,57 @@ class PLASPPlanner:
 
     Registered with Unified Planning as the ``PLASPPlanner`` engine.
 
+    `encoder_type` names the encoding family and, optionally, its layers:
+    ``'seq'`` picks the layers from the task itself, ``'seq+numeric+temporal'``
+    names them. Either way the resolved layers are in `self.layers` and the files
+    they load from in `self.encoding_paths`; see `aspplanners.plasp.layers`.
+
     The solve status of the last `plan()` call is kept in `self.status`
     (a `PlanGenerationResultStatus`) and human-readable notes in `self.logs`.
     """
 
     def __init__(self, problem, encoder_type='seq', compilationlist: Optional[List[List[str]]] = None,
                  time_scale: int = DEFAULT_TIME_SCALE):
-        if encoder_type not in ENCODERS:
+        family_name, explicit_layers = parse_selection(encoder_type)
+        if family_name not in ENCODERS:
             raise ValueError(
                 f"Unsupported encoder type: {encoder_type!r}; available: {sorted(ENCODERS)}")
-        encoder_cls, self.encoding_path = ENCODERS[encoder_type]
+        encoder_cls   = ENCODERS[family_name]
+        self.family   = FAMILIES[family_name]
         self.problem       = problem
         self.compiled_task = encoder_cls(time_scale=time_scale).compile(problem, self._check_compilationlist(problem, compilationlist))
         self.task          = self.compiled_task.problem
         # The task facts never change across horizons: build the string once.
         self.task_facts    = '\n'.join(sorted(self.compiled_task.fact_lines))
+        # Which layers of the encoding this task needs. Driven by the facts the
+        # encoder actually emitted, widened by what the compiled problem's kind
+        # suggests, and then checked for coverage -- an emitted fact that no
+        # loaded layer reads is silently ignored by clingo, so it is rejected
+        # here rather than surfacing as a failed plan validation later.
+        self.layers = self._select_layers(explicit_layers)
+        self.encoding_paths = self.family.paths(self.layers)
         # Model atoms carry ASP-rendered names ('-' -> '_'); map them back to
         # the compiled task's vocabulary (the encoder guarantees injectivity).
         self._actions_by_asp_name = {asp_name(a.name): a for a in self.task.actions}
         self._objects_by_asp_name = {asp_name(o.name): o for o in self.task.all_objects}
         self.logs: List[str] = []
         self.status: Optional[PlanGenerationResultStatus] = None
+
+    def _select_layers(self, explicit_layers: Optional[Tuple[str, ...]]) -> Tuple[str, ...]:
+        """Resolve the encoding layers for this task, explicit or inferred.
+
+        `explicit_layers` comes from an ``'seq+numeric+temporal'``-style spec. It
+        is not taken at face value: it is closed under each layer's requirements
+        and then coverage-checked like an inferred set, so naming too few layers
+        is an error rather than a program that quietly ignores half the task.
+        """
+        predicates = fact_predicates(self.compiled_task.fact_lines)
+        if explicit_layers is None:
+            layers = self.family.select(predicates, kind=self.task.kind)
+        else:
+            layers = self.family.close(explicit_layers)
+        self.family.check_coverage(predicates, layers)
+        return layers
 
     def _check_compilationlist(self, problem, compilationlist: Optional[List[List[str]]]) -> List[List[str]]:
         """The UP compilers to run before encoding: by default, none."""
@@ -95,22 +124,30 @@ class PLASPPlanner:
         the encoding rules. Useful for dumping to a file or feeding a clingo
         Control of your own.
 
+        The selected layers are concatenated in dependency order, which is the
+        same order `plan()` loads them in and produces the same program -- every
+        layer file opens with an explicit `#program base.`, so no layer inherits
+        the part its predecessor happened to end in.
+
         The encoding is multi-shot (`#program base/step(t)/check(t)`): ground
         it with parts [('base', []), ('step', [1..h]), ('check', [h])] and
         assign the external `query(h)` to true for a fixed-horizon solve.
         The facts come first so they belong to the implicit base part.
         """
-        with open(self.encoding_path, 'r') as f:
-            encoding = f.read()
-        return f"%% Task facts\n{self.task_facts}\n\n{encoding}"
+        sections = [f"%% Task facts\n{self.task_facts}"]
+        for name, path in zip(self.layers, self.encoding_paths):
+            with open(path, 'r') as f:
+                sections.append(f"%% Layer: {name}\n{f.read()}")
+        return '\n\n'.join(sections)
 
     def encoding_terms(self) -> List[ASPStatement]:
         """The loaded encoding parsed into ASPTerm statements (facts, rules,
         constraints, directives) for programmatic inspection or rewriting;
         write a modified list back with `aspplanners.lp_io.dump_lp`.
         Unlike `lp_program()`, the rendering is clingo-normalized (comments
-        dropped, whitespace normalized)."""
-        return parse_lp_file(self.encoding_path)
+        dropped, whitespace normalized). Layers are concatenated in load order.
+        """
+        return [term for path in self.encoding_paths for term in parse_lp_file(path)]
 
     def dump_lp_program(self, destination) -> None:
         """Write the complete logic program (task facts + encoding, verbatim
@@ -145,7 +182,8 @@ class PLASPPlanner:
         deadline = time.monotonic() + timeout if timeout is not None else None
 
         ctl = clingo.Control(arguments=['-n', '1'])
-        ctl.load(self.encoding_path)
+        for path in self.encoding_paths:
+            ctl.load(path)
         ctl.add('base', [], self.task_facts)
 
         if horizon is not None:

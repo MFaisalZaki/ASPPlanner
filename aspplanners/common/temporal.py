@@ -4,9 +4,9 @@ PDDL 2.1's durative actions are encoded the way SMTPlan's happening encoder
 encodes them: each one is split into the pair of instantaneous *snap* actions
 that carry its at-start and at-end conditions and effects, leaving only the
 over-all conditions and the duration to be re-attached by whatever couples the
-two halves back together (the temporal layer of
-``aspplanners/plasp/encodings/sequential-horizon.lp`` for the PLASP backend, the
-``run``/``rem`` atoms of :mod:`aspplanners.abaplan.encoder` for the ABA one).
+two halves back together (``aspplanners/plasp/encodings/seq/temporal.lp`` for the
+PLASP backend, the ``run``/``rem`` atoms of :mod:`aspplanners.abaplan.encoder`
+for the ABA one).
 
 Both backends reason over integers, so durations are put on an integer grid
 here as well: see :func:`time_unit`.

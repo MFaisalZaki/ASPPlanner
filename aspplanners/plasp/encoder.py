@@ -20,7 +20,11 @@ from functools import partial
 from unified_planning.plans import ActionInstance
 
 from aspplanners.common.tim_typer import TIMTypeInferenceCompiler
-from aspplanners.plasp.rescale import scale_numeric_constants
+from aspplanners.plasp.rescale import (
+    apply_duration_scales,
+    duration_fluent_scales,
+    scale_numeric_constants,
+)
 from aspplanners.common.compilation import (
     compose_map_backs,
     initialize_fluent_defaults,
@@ -214,8 +218,14 @@ class PLASPEncoder:
         # PDDL 2.1 decomposition SMTPlan's happening encoder is built on. The
         # snaps carry the at-start/at-end halves and are encoded as ordinary
         # actions; `durative_facts` re-couples them (see ASPDurativeAction).
+        #
+        # The duration-fluent factors are worked out first but applied further
+        # down, once nothing but the fact builder still reads those values: the
+        # time grid the split computes has to come from the durations the task
+        # states, not from the integer stand-ins these factors produce.
+        duration_scales = duration_fluent_scales(new_problem)
         time_unit, durative_facts, snap_actions, asp_actions = \
-            self._split_durative_actions(new_problem)
+            self._split_durative_actions(new_problem, duration_scales)
 
         # Names are sanitized ('-' -> '_') at fact-rendering time by
         # asp_facts.asp_name and mapped back the same way during plan
@@ -237,6 +247,12 @@ class PLASPEncoder:
         # have no holds/3 chain, which silently disables every numeric
         # precondition that reads it.
         initialize_fluent_defaults(new_problem)
+
+        # Last thing before the facts: a duration fluent's values go onto their
+        # own integer grid, which the durationValue rules divide back out. It
+        # waits until here so the defaults above are covered too, and so nothing
+        # that reasons about real durations ever sees the scaled stand-ins.
+        apply_duration_scales(new_problem, duration_scales)
 
         # False initial values are dropped, because a variable that is only ever
         # read as true needs no holds/3 chain for its false side and every such
@@ -293,7 +309,7 @@ class PLASPEncoder:
     # Temporal: durative actions -> snap actions + temporal facts
     # ------------------------------------------------------------------
 
-    def _split_durative_actions(self, problem: Problem):
+    def _split_durative_actions(self, problem: Problem, duration_scales=None):
         """Decompose every durative action into its two snap actions.
 
         Returns ``(time_unit, durative_facts, snap_actions, asp_actions)``: the
@@ -318,7 +334,8 @@ class PLASPEncoder:
             snap_actions[asp_name(snap.start.name)] = (snap.action.name, 'start')
             snap_actions[asp_name(snap.end.name)] = (snap.action.name, 'end')
             durative_facts.append(ASPDurativeAction(
-                snap.action, snap.start.name, snap.end.name, snap.duration, snap.overall))
+                snap.action, snap.start.name, snap.end.name, snap.duration, snap.overall,
+                duration_scales))
         return unit, durative_facts, snap_actions, asp_actions
 
     def _remove_delete_then_set(self, dirty_action: Action) -> Action:

@@ -2,7 +2,8 @@
 
 import io
 
-from aspplanners.plasp.planner import PLASPPlanner, ENCODERS
+from aspplanners.plasp.planner import PLASPPlanner
+from aspplanners.plasp.layers import SEQ
 from aspplanners.lp_io import (
     ASPConstraint,
     ASPDirective,
@@ -21,7 +22,7 @@ from test_planner import (
     rover_recharge_problem,
 )
 
-SEQ_ENCODING_PATH = ENCODERS["seq"][1]
+SEQ_ENCODING_PATHS = SEQ.paths(SEQ.layer_names)
 
 
 def test_parse_lp_classifies_statements():
@@ -45,7 +46,7 @@ def test_parse_lp_classifies_statements():
 
 
 def test_parse_dump_parse_is_a_fixpoint():
-    first = parse_lp_file(SEQ_ENCODING_PATH)
+    first = [t for path in SEQ_ENCODING_PATHS for t in parse_lp_file(path)]
     assert first, "the bundled encoding should parse to statements"
 
     buffer = io.StringIO()
@@ -64,8 +65,8 @@ def test_dumped_encoding_still_solves(tmp_path):
     planner = PLASPPlanner(problem, "seq")
 
     dumped = tmp_path / "roundtripped.lp"
-    dump_lp(parse_lp_file(SEQ_ENCODING_PATH), dumped)
-    planner.encoding_path = str(dumped)
+    dump_lp([t for path in planner.encoding_paths for t in parse_lp_file(path)], dumped)
+    planner.encoding_paths = [str(dumped)]
 
     plan = planner.plan(max_horizon=6)
     assert len(plan.actions) == 3

@@ -935,7 +935,7 @@ class ASPAction(ASPTerm):
         return '\n'.join(_sig)
 
 
-def _duration_arithmetic(expression, da, counter=None, lookups=None):
+def _duration_arithmetic(expression, da, scales=None, counter=None, lookups=None):
     """``(numerator, denominator, lookups)`` for a deferred duration expression.
 
     The value is carried as an exact rational of two clingo integer terms rather
@@ -946,7 +946,12 @@ def _duration_arithmetic(expression, da, counter=None, lookups=None):
     `lookups` collects one ``initialState(...)`` body atom per fluent occurrence,
     binding it to a fresh ASP variable; that is what resolves the value per
     parameter binding at grounding time, so the task never has to be ground.
+
+    `scales` is the per-fluent factor its initial values were multiplied by to
+    become integers (see rescale.duration_fluent_scales). It goes into the
+    denominator, which is what divides it back out of the duration.
     """
+    scales = {} if scales is None else scales
     counter = [0] if counter is None else counter
     lookups = [] if lookups is None else lookups
 
@@ -960,9 +965,9 @@ def _duration_arithmetic(expression, da, counter=None, lookups=None):
         counter[0] += 1
         lookups.append(
             f"initialState({str(fluent)}, value({str(fluent)}, {variable}))")
-        return variable, "1", lookups
+        return variable, str(scales.get(expression.fluent().name, 1)), lookups
 
-    operands = [_duration_arithmetic(arg, da, counter, lookups)
+    operands = [_duration_arithmetic(arg, da, scales, counter, lookups)
                 for arg in expression.args]
     numerators = [n for n, _d, _l in operands]
     denominators = [d for _n, d, _l in operands]
@@ -1017,7 +1022,8 @@ class ASPDurativeAction(ASPTerm):
     they instantiate for exactly the parameter bindings the snap actions do.
     """
 
-    def __init__(self, da, start_name, end_name, duration_bounds, overall_conditions):
+    def __init__(self, da, start_name, end_name, duration_bounds, overall_conditions,
+                 duration_scales=None):
         self.up_action = da
         signature = _signature(da.parameters)
         self._head  = f"durative({_head_term(da.name, signature)})"
@@ -1034,7 +1040,7 @@ class ASPDurativeAction(ASPTerm):
             self._duration = str(lower) if lower == upper else f"{lower}..{upper}"
         else:
             numerator, denominator, lookups = _duration_arithmetic(
-                duration_bounds.expression, da)
+                duration_bounds.expression, da, duration_scales)
             # Kept as a single rational and divided once, because clingo's `/`
             # truncates: `(distance / speed) * mult / div` would floor 5/2 to 2
             # before the scaling ever ran. Dividing only at the end is exact,

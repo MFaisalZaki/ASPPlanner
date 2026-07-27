@@ -79,6 +79,7 @@ exclude = ["tests*"]
 [tool.setuptools.package-data]
 "aspplanners.plasp" = [
     "encodings/*.lp",
+    "encodings/*/*.lp",
 ]
 
 [tool.black]
