@@ -45,10 +45,11 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 CLASSICAL_REPO="https://github.com/AI-Planning/classical-domains.git"
 NUMERIC_REPO="https://github.com/pyPMT/numeric-domains.git"
-# The IPC archive is where the temporal benchmarks live: every `*-time*` and
-# `*-temporal*` domain from IPC-2002 onwards, in one uniform layout. There is no
-# equivalent of classical-domains/numeric-domains for the temporal track.
-TEMPORAL_REPO="https://github.com/potassco/pddl-instances.git"
+# The IPC-2018 temporal track: the nine domains and their ten instances each,
+# as competed. Small and entirely temporal, unlike the potassco/pddl-instances
+# archive this used to clone, where the temporal domains sat interleaved with
+# the classical and numeric ones the two repos above already cover.
+TEMPORAL_REPO="https://github.com/nergmada/ipc2018-temporal-track.git"
 
 usage() {
     cat <<'EOF'
@@ -279,7 +280,7 @@ SUITE_TRACK_ARGS=()
 if [ "$SKIP_FETCH" != "yes" ]; then
     if has_track classical; then clone_or_update "$CLASSICAL_REPO" "${TASKS_DIR}/classical-domains"; fi
     if has_track numeric;   then clone_or_update "$NUMERIC_REPO"   "${TASKS_DIR}/numeric-domains"; fi
-    if has_track temporal;  then clone_or_update "$TEMPORAL_REPO"  "${TASKS_DIR}/pddl-instances"; fi
+    if has_track temporal;  then clone_or_update "$TEMPORAL_REPO"  "${TASKS_DIR}/ipc2018-temporal-track"; fi
 fi
 
 if has_track classical && [ -d "${TASKS_DIR}/classical-domains" ]; then
@@ -288,11 +289,12 @@ fi
 if has_track numeric && [ -d "${TASKS_DIR}/numeric-domains" ]; then
     TASKS_ARGS+=(--tasks-dir "numeric-domains=${TASKS_DIR}/numeric-domains")
 fi
-if has_track temporal && [ -d "${TASKS_DIR}/pddl-instances" ]; then
-    TASKS_ARGS+=(--tasks-dir "pddl-instances=${TASKS_DIR}/pddl-instances")
-    # The IPC archive holds all three tracks; take only its temporal domains so
-    # its classical and numeric ones do not duplicate the two repos above.
-    SUITE_TRACK_ARGS+=(--suite-tracks "pddl-instances=temporal")
+if has_track temporal && [ -d "${TASKS_DIR}/ipc2018-temporal-track" ]; then
+    TASKS_ARGS+=(--tasks-dir "ipc2018-temporal=${TASKS_DIR}/ipc2018-temporal-track")
+    # Every domain in that repository is temporal today, and the restriction
+    # keeps it that way: a domain added upstream without a `:durative-action`
+    # would otherwise be classified classical and land in the classical track.
+    SUITE_TRACK_ARGS+=(--suite-tracks "ipc2018-temporal=temporal")
 fi
 if [ ${#TASKS_ARGS[@]} -eq 0 ]; then
     die "no benchmark repository available for tracks: ${TRACKS}"
@@ -361,5 +363,5 @@ Next steps
 
   re-generate after changing the experiment (skips finished tasks):
     ${ASPBENCH} generate --exp-dir ${EXP_DIR} --sandbox-dir ${SANDBOX_DIR} \\
-        --venv-dir ${VENV_DIR} ${TASKS_ARGS[*]} --skip-existing
+        --venv-dir ${VENV_DIR} ${TASKS_ARGS[*]} ${SUITE_TRACK_ARGS[*]:-} --skip-existing
 EOF

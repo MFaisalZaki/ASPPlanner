@@ -124,7 +124,7 @@ def _add_task_arguments(parser: argparse.ArgumentParser) -> None:
                              'Prefix with LABEL= to name the suite.')
     parser.add_argument('--suite-tracks', action='append', default=None, metavar='LABEL=TRACKS',
                         help='restrict one repository to some tracks, e.g. '
-                             'pddl-instances=temporal; repeatable')
+                             'ipc2018-temporal=temporal; repeatable')
     parser.add_argument('--tracks', nargs='+', choices=list(TRACKS), default=None,
                         help='restrict to these tracks (default: the experiment setting)')
     parser.add_argument('--domains', nargs='+', default=None,

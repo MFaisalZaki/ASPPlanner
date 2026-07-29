@@ -16,7 +16,12 @@ the benchmark sets we care about:
              `potassco/pddl-instances <https://github.com/potassco/pddl-instances>`_.
 
 ``flat``     a directory with a ``domain.pddl`` and its problems as siblings —
-             the shape of ``tests/pddl`` and of most hand-made task sets.
+             the shape of ``tests/pddl`` and of most hand-made task sets. A
+             *numbered* directory holding one domain/problem pair is read as one
+             instance of the domain above it rather than as a domain of its own,
+             which is the second layout in `nergmada/ipc2018-temporal-track
+             <https://github.com/nergmada/ipc2018-temporal-track>`_
+             (``airport-temporal-strips/27/{domain,instance-27}.pddl``).
 
 The track a task belongs to is decided by *reading the domain file*, not by
 which repository it came from: a repo named "classical-domains" still holds
@@ -34,9 +39,16 @@ from dataclasses import dataclass, asdict
 from fnmatch import fnmatch
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-# Directories that never hold tasks; pruned from the walk.
-_PRUNED = {'.git', '.github', '__pycache__', '.idea', '.vscode', 'generator',
-           'generators', 'venv', '.venv', 'node_modules'}
+# Directories that never hold tasks; pruned from the walk. Hidden directories
+# go with them: besides the tooling ones, benchmark repositories collect
+# archive-extraction leftovers (`.fr-Kn5g0f/` and friends in the IPC-2018
+# temporal track) that hold a second, differently-shaped copy of a domain.
+_PRUNED = {'__pycache__', 'generator', 'generators', 'venv', 'node_modules'}
+
+
+def _prune(dirname: str) -> bool:
+    return dirname in _PRUNED or dirname.startswith('.')
+
 
 TRACKS = ('classical', 'numeric', 'temporal')
 
@@ -121,7 +133,7 @@ def discover(root: str, suite: Optional[str] = None,
     seen_pairs = set()          # (domain_file, problem_file) realpaths
 
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in _PRUNED)
+        dirnames[:] = sorted(d for d in dirnames if not _prune(d))
         found: List[Task] = []
         looks_like_domain = False
 
@@ -335,12 +347,30 @@ def _flat_names(dirpath: str) -> Tuple[str, Optional[str]]:
     A directory sitting directly under ``instances/`` is one instance of the
     domain above it, not a domain of its own -- otherwise a set like 15-puzzle
     turns into a hundred one-instance "domains" called ``korf1``..``korf100``.
+
+    A numbered directory whose parent holds no PDDL of its own is the same
+    thing without the ``instances/`` level (``airport-temporal-strips/27/``).
+    Reading it as a domain would not just misname it: the numbers repeat across
+    domains, so ``airport-temporal-strips/9`` and ``trucks-time-strips/9`` would
+    both become domain ``9`` and their instances would share a task id -- and
+    hence a result file.
     """
     basename = os.path.basename(dirpath.rstrip(os.sep))
     parent = os.path.dirname(dirpath.rstrip(os.sep))
     if os.path.basename(parent) == 'instances':
         return os.path.basename(os.path.dirname(parent)), basename
+    if basename.isdigit() and not _holds_pddl(parent):
+        return os.path.basename(parent), basename
     return basename, None
+
+
+def _holds_pddl(dirpath: str) -> bool:
+    """Does `dirpath` have PDDL files of its own (rather than only in children)?"""
+    try:
+        return any(f.endswith('.pddl') and os.path.isfile(os.path.join(dirpath, f))
+                   for f in os.listdir(dirpath))
+    except OSError:
+        return False
 
 
 # ----------------------------------------------------------------------

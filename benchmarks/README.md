@@ -29,13 +29,28 @@ Everything it asks for also has a flag, so a scripted run is the same script:
 |---|---|---|
 | classical | [AI-Planning/classical-domains](https://github.com/AI-Planning/classical-domains) | every domain with an `api.py` |
 | numeric | [pyPMT/numeric-domains](https://github.com/pyPMT/numeric-domains) | every domain with an `api.py` |
-| temporal | [potassco/pddl-instances](https://github.com/potassco/pddl-instances) | the `*-time*` / `*-temporal*` IPC domains |
+| temporal | [nergmada/ipc2018-temporal-track](https://github.com/nergmada/ipc2018-temporal-track) | all 9 domains × 10 instances, as competed |
 
-There is no dedicated temporal-domains repository the way there is for the
-other two tracks; the IPC archive above is the closest thing, and it carries
-every temporal track from IPC-2002 onwards in one uniform layout. Only its
-temporal domains are taken (`--suite-tracks pddl-instances=temporal`), so its
-classical and numeric domains do not duplicate the two repos above.
+The temporal set is the IPC-2018 temporal track exactly as it ran: 90 tasks over
+`Cushing`, `Floortile`, `Mapanalyser`, `Parking`, `airport-temporal-strips`,
+`quantum_circuit`, `road-traffic-accident`, `sokoban` and `trucks-time-strips`.
+It replaces [potassco/pddl-instances](https://github.com/potassco/pddl-instances),
+which was used before for want of a temporal-only repository — that archive is
+all three tracks in one tree, so it contributed its temporal domains only
+through a filter, and pulled in every IPC edition from 2002 onwards rather than
+one competition. `--suite-tracks ipc2018-temporal=temporal` is still passed, not
+to deduplicate now but to keep the suite honest: a domain added upstream without
+a `:durative-action` would otherwise be classified classical and land in the
+classical track.
+
+To sweep the old archive as well (or instead), point `generate` at it directly —
+nothing in the harness is specific to either repository:
+
+```bash
+aspbench generate --exp-dir experiment --sandbox-dir sandbox --venv-dir venv \
+    --tasks-dir pddl-instances=benchmark-tasks/pddl-instances \
+    --suite-tracks pddl-instances=temporal
+```
 
 A task's track is decided by **reading its domain file**, not by which
 repository it came from: `:durative-action` (or a PDDL+ `:process`/`:event`)
@@ -47,11 +62,18 @@ including your own task directory, which needs no `api.py`:
 aspbench discover --tasks-dir mine=/path/to/my-domains
 ```
 
-Four repository layouts are recognised: an `api.py` domain directory, an IPC
+Five repository layouts are recognised: an `api.py` domain directory, an IPC
 `instances/` directory (with a shared domain file or one `domains/domain-N.pddl`
 per instance), one sub-directory per instance under `instances/`
-(`instances/korf1/korf1_{domain,problem}.pddl`), and a plain domain file with
-its problems as siblings.
+(`instances/korf1/korf1_{domain,problem}.pddl`), a *numbered* sub-directory per
+instance directly under the domain
+(`airport-temporal-strips/27/{domain,instance-27}.pddl`, half of the IPC-2018
+set), and a plain domain file with its problems as siblings.
+
+That fourth one is read as an instance of the domain above it, not as a domain
+called `27`: the numbers repeat across domains, so `airport-temporal-strips/9`
+and `trucks-time-strips/9` would otherwise both become domain `9` and their
+instances would collide on a task id — and hence on a result file.
 
 Discovery is defensive about the state these repositories are actually in. An
 `api.py` is authoritative *for its own directory only* — a few are copy-pasted

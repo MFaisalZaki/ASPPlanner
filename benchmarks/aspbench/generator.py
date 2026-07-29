@@ -108,9 +108,9 @@ def collect_tasks(tasks_dirs: Sequence[str], experiment: Optional[Experiment], a
     a label the directory name is used.
 
     ``--suite-tracks LABEL=track,...`` narrows one repository to some tracks,
-    which is how the IPC set contributes its temporal domains without also
-    re-contributing the classical ones that ``classical-domains`` already
-    covers.
+    which is how a repository contributes only what it is there for -- the
+    IPC-2018 temporal set its temporal domains -- whatever the track sniffer
+    makes of the rest of it.
     """
     selection = experiment.task_selection if experiment else {}
     suite_tracks: Dict[str, List[str]] = {}

@@ -329,6 +329,8 @@ Everything below is one sweep, run 2026-07-27 → 2026-07-28 through the [aspben
 
 A task's track is decided by **reading its domain file**, not by which repository it came from — which is why 1,537 IPC "classical" instances land on the numeric track: they carry a `(total-cost)` function.
 
+> **The temporal source has since changed.** `setup_benchmark.sh` now clones [nergmada/ipc2018-temporal-track](https://github.com/nergmada/ipc2018-temporal-track) — the IPC-2018 temporal track as competed, 9 domains × 10 instances — instead of the multi-track archive above. The table records what *this* sweep ran on, so a re-run's temporal denominator will be 90 rather than 2,680. The classical and numeric sources are unchanged.
+
 The run artifacts (`results.csv`, per-task JSONs, error logs) are not checked in — `sandbox*` and `benchmark-run/` are gitignored. See [Reproducing](#reproducing).
 
 ### Reading the status column
