@@ -82,7 +82,18 @@ caused(Variable, Value, t) :- occurs(Action, t), postcondition(Action, Effect, V
 % Inertia
 modified(Variable, t) :- caused(Variable, Value, t).
 
-holds(Variable, Value, t) :- caused(Variable, Value, t).
+% An action may set and clear the same fluent at one step -- two conditional
+% effects whose conditions both hold, say, which is the shape the ADL domains
+% reach through `forall`/`when` over the same predicate. PDDL settles it the
+% same way STRIPS does: the add wins. Arbitrating it here rather than dropping
+% one of the effects up front is what keeps a *conditional* clear alive for the
+% states its condition picks out; without it both values would hold at once,
+% which is not a state at all. A non-boolean value has no such rule -- two
+% effects assigning one numeric fluent different values is a malformed task,
+% not a race with a winner.
+holds(Variable, Value, t) :- caused(Variable, Value, t), Value != value(Variable, false).
+holds(Variable, value(Variable, false), t) :- caused(Variable, value(Variable, false), t),
+                                              not caused(Variable, value(Variable, true), t).
 holds(variable(V), Value, t) :- holds(variable(V), Value, t - 1), not modified(variable(V), t).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

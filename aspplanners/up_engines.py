@@ -84,6 +84,14 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_conditions_kind('EXISTENTIAL_CONDITIONS')
         kind.set_conditions_kind('UNIVERSAL_CONDITIONS')
         kind.set_effects_kind('CONDITIONAL_EFFECTS')
+        # A `forall` effect is encoded, not compiled away: its variables are
+        # emitted free and the grounder ranges them, the same expansion a
+        # `forall` *condition* gets. A conditional one indexes its effect term
+        # by them, so each binding fires on its own condition (facts.ASPAction).
+        # A *numeric* conditional effect is the one shape left out, and is
+        # raised at encoding time -- numEffect/numAssign hang off occurs/2 with
+        # no room for a condition; a forall numeric effect is fine.
+        kind.set_effects_kind('FORALL_EFFECTS')
         kind.set_effects_kind('INCREASE_EFFECTS')
         kind.set_effects_kind('DECREASE_EFFECTS')
         kind.set_effects_kind('STATIC_FLUENTS_IN_NUMERIC_ASSIGNMENTS')
@@ -197,6 +205,13 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         kind.set_conditions_kind("UNIVERSAL_CONDITIONS")
         kind.set_effects_kind("INCREASE_EFFECTS")
         kind.set_effects_kind("DECREASE_EFFECTS")
+        # A `forall` effect needs nothing of this backend: the pipeline opens
+        # with up_quantifiers_remover, which expands it over the objects along
+        # with the quantified conditions (see abaplan.encoder._PRE_COMPILERS).
+        # An effect whose forall carries a `when` expands into conditional
+        # effects, which this encoding does not have -- so such a task is
+        # refused for CONDITIONAL_EFFECTS, as it already was.
+        kind.set_effects_kind("FORALL_EFFECTS")
         # Temporal planning over the same PDDL 2.1 durative-action fragment the
         # PLASP backend covers; see UPPLASPPlanner.supported_kind.
         kind.set_time("CONTINUOUS_TIME")

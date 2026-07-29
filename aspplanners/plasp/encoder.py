@@ -346,12 +346,26 @@ class PLASPEncoder:
 
         A durative action is cleaned per timing: an add and a delete of the same
         fluent only race when they happen at the same endpoint.
+
+        Only an add that *always* fires shadows the delete. A conditional or
+        quantified one does not: it fires for some states and bindings and not
+        others, so dropping the delete would silently retract it everywhere. The
+        ADL domains are full of the pattern -- miconic's `stop` clears `boarded`
+        for the passengers who have arrived and sets it for those getting on,
+        two `forall`/`when` effects on the same fluent -- and dropping the clear
+        there leaves every passenger aboard forever, which deadlocks the lift's
+        own `(imply (going_down ?p) (not (boarded ?p)))` precondition. What is
+        left of the race once both survive -- an add and a delete that do fire
+        together -- is settled in the encoding by PDDL's own rule, add wins
+        (see the caused/3 arbitration in encodings/seq/core.lp).
         """
 
         def has_positive_effect(fluent, effects) -> bool:
-            """ Does the group have an effect that assigns the fluent to true? """
+            """Does the group *unconditionally* assign the fluent to true?"""
             for eff in effects:
-                if eff.kind == EffectKind.ASSIGN and eff.fluent == fluent and eff.value.is_true():
+                if eff.kind == EffectKind.ASSIGN and eff.fluent == fluent \
+                        and eff.value.is_true() \
+                        and not eff.is_conditional() and not eff.is_forall():
                     return True
             return False
 

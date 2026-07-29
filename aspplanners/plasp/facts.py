@@ -123,12 +123,24 @@ class ASPDisjunction:
         return names
 
 
-def _quantified_vars(f):
-    """``(ASP variable names, has(...) bindings)`` for a quantifier's variables."""
-    variables = list(f.variables())
+def _variable_terms(variables):
+    """``(ASP variable names, has(...) bindings)`` for UP quantified variables.
+
+    The bindings are what range a variable over the universe, so emitting a rule
+    that carries them is what expands the quantifier -- in the grounder, not in a
+    compiler. Both places a quantifier can appear share this: a ``forall``/
+    ``exists`` in a condition (whose variables come off the FNode) and a
+    ``forall`` *effect* (whose variables come off the UP ``Effect``).
+    """
+    variables = list(variables)
     names = [QUANTIFIED_PREFIX + asp_name(v.name).upper() for v in variables]
     bindings = [f'has({name}, {str(ASPType(v.type))})' for name, v in zip(names, variables)]
     return names, bindings
+
+
+def _quantified_vars(f):
+    """``(ASP variable names, has(...) bindings)`` for a quantifier's variables."""
+    return _variable_terms(f.variables())
 
 
 def _quantified_id(names):
@@ -704,6 +716,53 @@ class ASPGroundedFluent(ASPTerm):
         return f'variable(({_ret_str}))'
 
 
+def _conditional_effect_value(eff, action_name, term):
+    """The value a conditional effect's ``postcondition`` fact assigns.
+
+    A conditional effect rides on ``postcondition``/``caused``, which states the
+    variable's new value outright. A boolean one is that value; so is a numeric
+    *assignment* of a constant, since a numeric variable's value travels on the
+    same ``holds`` chain (``numval/3`` projects it).
+
+    The two shapes that path cannot state are refused here rather than encoded
+    into something else: an increase/decrease, whose new value is the old one
+    plus a delta (``numEffect`` reads that off ``occurs/2``, where a condition
+    has nowhere to go), and an assignment reading the state, which has to be
+    evaluated at the step before (``numAssignExpr``, same problem).
+    """
+    if eff.fluent.type.is_bool_type():
+        return str(eff.value).lower()
+    if eff.kind in (EffectKind.INCREASE, EffectKind.DECREASE):
+        raise NotImplementedError(
+            f"The conditional numeric effect {eff} of action {action_name!r} is not "
+            f"supported: an increase/decrease is applied by numEffect, which the "
+            f"encoding reads off occurs/2 with no room for the effect's condition. "
+            f"State it as a conditional assignment of a constant, or lift the "
+            f"condition into the action's precondition.")
+    form = _linear_form(eff.value)
+    if _reads_fluents(form):
+        raise NotImplementedError(
+            f"The conditional numeric effect {eff} of action {action_name!r} is not "
+            f"supported: its assigned value reads the state, which numAssignExpr "
+            f"evaluates off occurs/2 with no room for the effect's condition. Only "
+            f"a constant assignment can be made conditional.")
+    return _in_clingo_range(form[1], f'the numeric effect on {term}')
+
+
+def _effect_bindings(eff, target):
+    """The ``has(_, type(...))`` atoms an effect's rules carry in their body.
+
+    A ``forall`` effect is emitted with its variables free and expanded by the
+    grounder, exactly as a ``forall`` *condition* is. Ranging the ones the
+    target fluent happens to mention is not enough: a variable the quantifier
+    binds but the fluent does not use still has to be safe in the rule (and, on
+    a conditional effect, still tells that binding's effect term from the rest),
+    so the quantifier's own atoms come first and the target's are added on top.
+    """
+    _names, bindings = _variable_terms(eff.forall)
+    return _dedup(bindings + list(target.bindings))
+
+
 def _dedup(items):
     """Order-preserving deduplication, for rule bodies assembled from parts."""
     seen, unique = set(), []
@@ -866,40 +925,46 @@ class ASPAction(ASPTerm):
         # fluent terms stays the numEffect/numAssign integer it always was; one
         # that reads fluents becomes a numEffectExpr/numAssignExpr, whose
         # expression the encoding evaluates against the step before.
-        num_deltas = {}   # fluent term -> summed linear-form delta
+        num_deltas = {}    # fluent term -> summed linear-form delta
+        num_bindings = {}  # fluent term -> the has(...) atoms its rules need
         for eff in a.unconditional_effects:
+            target = parseexpr(eff.fluent)
+            quantified = _effect_bindings(eff, target)
             if eff.kind in (EffectKind.INCREASE, EffectKind.DECREASE):
-                term = str(parseexpr(eff.fluent))
+                term = str(target)
                 form = _linear_form(eff.value)
                 if eff.kind == EffectKind.DECREASE:
                     form = _lin_scale(form, Fraction(-1))
                 num_deltas[term] = _lin_add(num_deltas[term], form) if term in num_deltas else form
+                num_bindings[term] = _dedup(num_bindings.get(term, []) + quantified)
                 continue
             if eff.kind == EffectKind.ASSIGN and not eff.fluent.type.is_bool_type():
-                term = str(parseexpr(eff.fluent))
+                term = str(target)
                 form = _linear_form(eff.value)
                 if _reads_fluents(form):
                     expr = _effect_expr(form, term)
-                    body = _dedup([f'action({self._head})'] + expr.bindings)
+                    body = _dedup([f'action({self._head})'] + quantified + expr.bindings)
                     head = f"numAssignExpr({self._head}, {term}, {str(expr)})"
                     self._postconditions.append(f"{head} :- {', '.join(body)}.")
                     self._postconditions += expr.declaration_rules(body)
                 else:
                     value = _in_clingo_range(form[1], f'the numeric effect on {term}')
+                    body = _dedup([f'action({self._head})'] + quantified)
                     head = f"numAssign({self._head}, {term}, {value})"
-                    self._postconditions.append(f"{head} :- action({self._head}).")
+                    self._postconditions.append(f"{head} :- {', '.join(body)}.")
                 continue
-            variable = parseexpr(eff.fluent)
+            variable = target
             value    = str(eff.value).lower()
             head = f"postcondition({self._head}, effect(unconditional), {str(variable)}, value({str(variable)}, {value}))"
             # `forall ?x . f(?x) := v` needs ?x ranged the same way a forall
             # condition does; the caused/3 rule then fires once per binding.
-            body = ', '.join([f'action({self._head})'] + list(variable.bindings))
+            body = ', '.join(_dedup([f'action({self._head})'] + quantified))
             self._postconditions.append(f"{head} :- {body}.")
         for term, form in num_deltas.items():
+            quantified = num_bindings.get(term, [])
             if _reads_fluents(form):
                 expr = _effect_expr(form, term)
-                body = _dedup([f'action({self._head})'] + expr.bindings)
+                body = _dedup([f'action({self._head})'] + quantified + expr.bindings)
                 head = f"numEffectExpr({self._head}, {term}, {str(expr)})"
                 self._postconditions.append(f"{head} :- {', '.join(body)}.")
                 self._postconditions += expr.declaration_rules(body)
@@ -907,8 +972,9 @@ class ASPAction(ASPTerm):
             delta = _in_clingo_range(form[1], f'the numeric effect on {term}')
             if delta == 0:
                 continue
+            body = _dedup([f'action({self._head})'] + quantified)
             head = f"numEffect({self._head}, {term}, {delta})"
-            self._postconditions.append(f"{head} :- action({self._head}).")
+            self._postconditions.append(f"{head} :- {', '.join(body)}.")
 
         # Conditional effects (`when C then F := V`). The existential/sequential
         # encoding already supports them via:
@@ -922,33 +988,51 @@ class ASPAction(ASPTerm):
         params_tail = (',' + ','.join(p[0] for p in self.signature)) if self.signature else ''
         for idx, eff in enumerate(a.conditional_effects):
             variable = parseexpr(eff.fluent)
-            value    = str(eff.value).lower()
-            effect_term = f'effect((cond,"{asp_name(a.name)}",{idx}{params_tail}))'
+            value    = _conditional_effect_value(eff, a.name, str(variable))
+            # A `forall` conditional effect is one effect per binding of its
+            # variables, so the bindings index the effect term. Sharing a single
+            # term across them would be a different task: caused/3 fires an
+            # effect only when *every* precondition of its term holds, so one
+            # term for all bindings demands every binding's condition at once
+            # instead of firing the effect once per binding that satisfies it.
+            forall_names, forall_bindings = _variable_terms(eff.forall)
+            effect_tail = params_tail + (',' + ','.join(forall_names) if forall_names else '')
+            effect_term = f'effect((cond,"{asp_name(a.name)}",{idx}{effect_tail}))'
             head = (
                 f"postcondition({self._head}, {effect_term}, "
                 f"{str(variable)}, value({str(variable)}, {value}))"
             )
-            self._postconditions.append(f"{head} :- action({self._head}).")
+            # Every rule that names the effect term has to range the quantified
+            # variables in it, whether or not this particular rule's own atoms
+            # mention them -- they are what tells the bindings' effects apart.
+            effect_body = _dedup([f'action({self._head})'] + forall_bindings)
+
+            condition_atoms = flatten_atoms(parseexpr(eff.condition))
+            # An equality in the condition gates the effect by not declaring its
+            # postcondition at all, so it is folded into that one rule's body
+            # (and only it: a precondition of an effect that has no
+            # postcondition can never fire anything). It is collected before any
+            # rule is emitted rather than patched onto the last one afterwards,
+            # which would land on an orGroup fact when a disjunction came first.
+            equalities = [ca for ca in condition_atoms if isinstance(ca, ASPEquality)]
+            equality_body = [b for ca in equalities for b in ca.bindings] \
+                + [str(ca) for ca in equalities]
+            self._postconditions.append(
+                f"{head} :- {', '.join(_dedup(effect_body + list(variable.bindings) + equality_body))}.")
 
             cond_group_index = 0
-            for ca in flatten_atoms(parseexpr(eff.condition)):
+            for ca in condition_atoms:
+                if isinstance(ca, ASPEquality):
+                    continue
                 if isinstance(ca, ASPDisjunction):
                     # The effect's own orGroup facts; the encoding's caused/3
                     # rule requires every group of the effect term to hold, the
                     # same way the action constraint does for an action's.
                     self._postconditions += _or_facts(
                         ca, str(cond_group_index), owner=effect_term,
-                        body_prefix=[f'action({self._head})'])
+                        body_prefix=effect_body)
                     self.negated_fluents |= ca.negated_fluent_names
                     cond_group_index += 1
-                    continue
-                if isinstance(ca, ASPEquality):
-                    # QuantifiersRemover.simplify() should ground-evaluate
-                    # parameter/object equalities away. If one survives here
-                    # it must reference an action parameter — fold it into
-                    # the effect's precondition by emitting it as a body
-                    # constraint on the rule itself.
-                    self._postconditions[-1] = self._postconditions[-1][:-1] + f", {str(ca)}."
                     continue
                 if isinstance(ca, ASPNumComparison):
                     raise NotImplementedError(
@@ -964,7 +1048,10 @@ class ASPAction(ASPTerm):
                 # A quantified variable in the condition is ranged here, so the
                 # effect gets one precondition atom per binding -- which is the
                 # conjunction over the universe a `forall` condition asks for.
-                body = ', '.join([f'action({self._head})'] + list(ca.bindings))
+                # A variable of the effect's *own* `forall` is ranged too, but
+                # its bindings are separate effect terms, so there it is one
+                # condition each rather than a conjunction.
+                body = ', '.join(_dedup(effect_body + list(ca.bindings)))
                 self._postconditions.append(f"{cond_head} :- {body}.")
 
     def _disjunction_facts(self, disjunction, index):

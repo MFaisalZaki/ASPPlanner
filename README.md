@@ -139,7 +139,7 @@ The encoding is split into `#program base / step(t) / check(t)` parts; ground `b
 | `:existential-preconditions` | ✅ | ✅ | native in PLASP; compiled away for ABA |
 | `:universal-preconditions` | ✅ | ✅ | native in PLASP; compiled away for ABA |
 | `:conditional-effects` | ✅ | ❌ | the ABA reduction has no encoding for them |
-| `forall` **effects** | ❌ | ❌ | not declared by either engine — the single largest gap, see [§3](#3-benchmark-results) |
+| `forall` **effects** | ✅ | ✅ unconditional only | native in PLASP (the quantifier is expanded by the grounder, like a `forall` condition); compiled away for ABA, so `(forall … (when …))` is still refused there as a conditional effect |
 | `:fluents` / `:numeric-fluents` | ✅ linear | ✅ simple numeric | see [Numeric planning](#numeric-planning) |
 | `:action-costs` | ⚠️ accepted | ⚠️ accepted | parsed and ignored; **not optimised** |
 | `:durative-actions` | ✅ | ✅ | PDDL 2.1, see [Temporal planning](#temporal-planning) |
@@ -158,16 +158,18 @@ The authoritative list is `supported_kind()` in [aspplanners/up_engines.py](aspp
 | `INT_FLUENTS`, `REAL_FLUENTS`, `INCREASE_EFFECTS`, `DECREASE_EFFECTS`, `SIMPLE_NUMERIC_PLANNING` | ✅ | ✅ |
 | `GENERAL_NUMERIC_PLANNING`, `STATIC_FLUENTS_IN_NUMERIC_ASSIGNMENTS`, `FLUENTS_IN_NUMERIC_ASSIGNMENTS` | ✅ | ❌ |
 | `CONDITIONAL_EFFECTS` | ✅ | ❌ |
+| `FORALL_EFFECTS` | ✅ | ✅ (expanded by the pipeline's quantifier remover) |
 | `UNDEFINED_INITIAL_NUMERIC`, `UNDEFINED_INITIAL_SYMBOLIC` | ✅ | ❌ |
 | `CONTINUOUS_TIME`, `DURATION_INEQUALITIES`, `INT_TYPE_DURATIONS`, `REAL_TYPE_DURATIONS`, `STATIC_FLUENTS_IN_DURATIONS` | ✅ | ✅ |
 | `MAKESPAN`, `ACTIONS_COST`, `PLAN_LENGTH`, `FINAL_VALUE` and the four `*_IN_ACTIONS_COST` kinds | ⚠️ accepted, never optimised | ⚠️ same |
-| `FORALL_EFFECTS`, `TIMED_EFFECTS`, `TIMED_GOALS`, `PROCESSES`, `EVENTS`, `SELF_OVERLAPPING`, `INTERMEDIATE_CONDITIONS_AND_EFFECTS`, `OVERSUBSCRIPTION` | ❌ | ❌ |
+| `TIMED_EFFECTS`, `TIMED_GOALS`, `PROCESSES`, `EVENTS`, `SELF_OVERLAPPING`, `INTERMEDIATE_CONDITIONS_AND_EFFECTS`, `OVERSUBSCRIPTION` | ❌ | ❌ |
 
 A task outside the declared kind is refused up front with `UNSUPPORTED_PROBLEM` rather than silently mis-encoded. `ProblemKind` cannot express every distinction, so a few shapes are raised at *encoding* time instead, as `NotImplementedError`:
 
 - a product or quotient of two numeric fluents (not linear),
 - a fractional coefficient in a numeric effect,
 - a bounded numeric type on a task that needs rescaling,
+- a **conditional** numeric effect other than the assignment of a constant — an `increase` or a value read off the state is applied by `numEffect`/`numAssignExpr`, which hang off `occurs/2` with no room for the effect's condition,
 - a numeric over-all condition in a durative action (**ABA backend only**).
 
 `GENERAL_NUMERIC_PLANNING` is declared because an effect that merely *reads* a fluent already pushes a task's kind there, and the feature has no linear/non-linear split.
@@ -180,7 +182,9 @@ Before a problem reaches the ASP encoder it is put through a list of UP compiler
 |---|---|
 | negative conditions | the encoding is multi-valued, so `value(V, false)` is a value like any other. A mirror fluent per negatively-read one would be pure overhead; the encoder just emits the false initial value for the fluents actually read as false |
 | `forall` | a conjunction over the universe — and `precondition`/`goal` facts are already conjunctive. One rule with the variable left free and `has(_, type(...))` in the body; gringo does the expanding |
+| `forall` **effects** | the same free variable, on the effect side. `(forall (?o) (not (in ?o)))` is one `postcondition` rule ranged by `has(Q_O, type(...))`. A conditional one — `(forall (?o) (when (in ?o) (at ?o ?to)))` — additionally *indexes its effect term* by the binding: `effect((cond,"move",0,FROM,TO,Q_O))`. That is the whole semantics. `caused/3` fires an effect only when **every** `precondition` of its effect term holds, so one term shared across the bindings would say "move the objects iff *all* of them are inside"; a term per binding says "move each object that is" |
 | `or`, `exists` | disjunctions, which conjunctive facts cannot state, so they get their own `orGroup`/`orDisjunct` vocabulary: at least one disjunct has to hold, and a disjunct holds when all of its literals do. An `exists` is the same shape with its disjuncts indexed by the quantified variable's binding |
+| an action that sets **and** clears one fluent | PDDL's own rule, arbitrated at the step rather than by deleting one of the effects: the add wins. Only an add that *always* fires shadows a delete up front; a conditional or quantified one leaves both in, and `core.lp` settles the bindings where they actually collide. This is what the ADL `forall`/`when` pairs need — miconic's `stop` clears `boarded` for the arrivals and sets it for the boarders, and dropping the clear strands every passenger aboard |
 | numeric comparisons | `<`, `<=`, `=` and their negations against `numval`, wherever a condition can appear: `numPrecondition`, `numGoal`, `numOverall`, and `orDisjunctNum` inside a disjunct. A negation is the comparison's complement (`not (x = y)` is `neq`), not a `not` over a `holds` chain the numeric side does not have |
 
 Staying lifted is the point. An action with *k* disjunctions of 4 literals each — the UP disjunction remover writes out 4<sup>k</sup> copies of it, the encoding writes one group:
@@ -284,7 +288,7 @@ The encoding is one `.lp` file per feature, under [aspplanners/plasp/encodings/s
 
 | Layer | File | Covers |
 |---|---|---|
-| `core` | [core.lp](aspplanners/plasp/encodings/seq/core.lp) | multi-valued STRIPS over the horizon: the action choice, preconditions, (conditional) effects, inertia, the goal test |
+| `core` | [core.lp](aspplanners/plasp/encodings/seq/core.lp) | multi-valued STRIPS over the horizon: the action choice, preconditions, (conditional) effects, add-wins arbitration, inertia, the goal test |
 | `numeric` | [numeric.lp](aspplanners/plasp/encodings/seq/numeric.lp) | linear numeric fluents, comparisons, effects and goals |
 | `disjunctive` | [disjunctive.lp](aspplanners/plasp/encodings/seq/disjunctive.lp) | disjunctive, existential and nested conditions and goals |
 | `temporal` | [temporal.lp](aspplanners/plasp/encodings/seq/temporal.lp) | PDDL 2.1 durative actions as SMTPlan-style happenings, annotated with the SMTPlan constraint each rule mirrors |
@@ -385,18 +389,34 @@ These are IPC files the reader does not accept; the encoder never sees them. Onl
 
 The remaining 6 are 3 `RecursionError`s and 3 `std::bad_alloc`s inside clingo.
 
-**`UNSUPPORTED` is one feature, plus a stale run.** Re-checking all 2,813 refused tasks against the *current* `supported_kind()`:
+**`UNSUPPORTED` is one feature, plus a stale run.** Re-checking all 2,813 refused tasks against the `supported_kind()` of the day:
 
 | | tasks |
 |---|---|
-| still refused at HEAD | 1,350 |
+| still refused then | 1,350 |
 | — carrying `FORALL_EFFECTS` | 1,115 |
 | — carrying `TIMED_EFFECTS` | 284 |
 | **would now be accepted** | **1,463** |
 
 The sweep predates the commits that declared `GENERAL_NUMERIC_PLANNING`, `FLUENTS_IN_NUMERIC_ASSIGNMENTS` and `CONDITIONAL_EFFECTS` (`573585b`, `af5e10c`), so 1,463 tasks — `15-puzzle`, `plotting`, `petrobras`, `fo-farmland`, `pancake`, `tpp`, the four `umts-*` temporal domains — were refused by a version that is no longer HEAD. **Coverage on the numeric and temporal tracks is therefore a lower bound**; a re-run is the cheapest way to improve these numbers.
 
-Everything else is `FORALL_EFFECTS`: a `(forall (?x) (when …))` effect. Neither backend declares it, and at 1,115 tasks it is by a wide margin the largest remaining feature gap.
+Everything else was `FORALL_EFFECTS`: a `(forall (?x) (when …))` effect. **HEAD encodes it** — see [Nothing is compiled away](#nothing-is-compiled-away). Re-checking the same 2,813 tasks once more, against HEAD:
+
+| `PLASPPlanner` vs. all 2,813 `UNSUPPORTED` tasks | tasks |
+|---|---|
+| **accepted at HEAD** | **2,529** |
+| still refused — every one of them on `TIMED_EFFECTS` | 284 |
+
+So the whole `UNSUPPORTED` column is now one feature: 1,066 tasks were held up by `forall` effects alone (the two columns above overlap in 49), and what is left is timed initial literals. The families that unblocks are the ADL ones — `miconic-fulladl`, `miconic-simpleadl`, `elevators-00-adl` and `schedule` at 150 tasks each, `airport-adl` and `airport-nontemporal-adl` at 50 — which encode and solve now.
+
+The ABA backend gains nothing here, and the same re-check says why: all 836 of its refusals are `CONDITIONAL_EFFECTS`, because every `forall` effect in this corpus is a `(forall … (when …))` and expands into exactly that. Declaring the feature there is honest bookkeeping — an unconditional `forall` effect really is supported — not extra coverage on these suites.
+
+Declaring the feature was not enough for all of them. `miconic-fulladl` sets *and* clears `boarded` through two `forall`/`when` effects of the same action, and the encoder's delete-then-set pass dropped the clear on sight of any add — which strands every passenger aboard and reads back as an unsolvable task rather than as a wrong plan. Only an add that always fires shadows a delete now, and `core.lp` settles the rest add-wins.
+
+**Being accepted is not being solved, and for one family it is not even being encoded.** The counts above are a kind-level check. Two caveats on reading them:
+
+- `airport-temporal-adl` and `airport-temporal-time-windows-*-adl` clear the kind check on `forall` effects and then hit the *encoding-time* refusal that was already in the table above — `move` carries a quantified implication as an over-all condition. `forall` effects are no longer what stops that family; over-all conditions are.
+- Everything else runs into the ordinary wall. `miconic-fulladl` at 5 passengers solves in 5.5 s; at 10 it needs a 30-step horizon and times out, exactly as §3.7.1 predicts.
 
 ### Runtime on solved instances
 
@@ -456,7 +476,7 @@ The classical track is **search-bound**: two thirds of everything the encoder ac
 
 The pattern is exactly the plan-length ceiling: `psr-small`, `movie` and `mprime` have short plans and are solved essentially completely; `elevators-00-strips` and `miconic` each solve a clean prefix — every instance of sizes `s1`–`s6`, nothing from `s7` on — and time out on the remaining 120. The two `EXHAUSTED` results (`mystery:prob07`, `no-mystery:prob07`) reached `max_horizon=1000` without a plan — the only tasks in the whole sweep where the search bound, rather than a resource limit, ended it.
 
-806 classical tasks were refused as `UNSUPPORTED` — the ADL variants (`miconic-fulladl`, `miconic-simpleadl`, `elevators-00-adl`, `schedule`), all on `forall` effects. 616 more failed in the PDDL reader.
+806 classical tasks were refused as `UNSUPPORTED` — the ADL variants (`miconic-fulladl`, `miconic-simpleadl`, `elevators-00-adl`, `schedule`), all on `forall` effects, **which HEAD now encodes** (see the re-check above). 616 more failed in the PDDL reader.
 
 ## 3.4 Numeric
 
@@ -529,7 +549,7 @@ Even the solved instances show it — median peak memory 1,145 MB against 140 MB
 
 The solved plans are correct time-triggered plans with genuine concurrency — `airport-temporal-strips:instance-4` is 20 snap actions at makespan 129.0 in 12.7 s; `driverlog-time-simple-automatic:instance-1` is makespan 92.7 in 12.3 s. The encoding is right; it is the discretisation constant that is too expensive.
 
-716 temporal tasks were refused as `UNSUPPORTED` (the `airport-temporal-*-adl` family on `forall` effects, plus 284 on `TIMED_EFFECTS` — timed initial literals, which the whole `*-time-windows-*` family uses). Another 728 failed in the PDDL reader — the highest of any track, mostly `SyntaxError` on `total-time` and `duration` expressions the UP reader rejects.
+716 temporal tasks were refused as `UNSUPPORTED` (the `airport-temporal-*-adl` family on `forall` effects — HEAD accepts those, since a durative action's `forall` effect travels into its snap actions, but that family then meets the over-all-condition refusal instead — plus 284 on `TIMED_EFFECTS`, timed initial literals, which the whole `*-time-windows-*` family uses). Another 728 failed in the PDDL reader — the highest of any track, mostly `SyntaxError` on `total-time` and `duration` expressions the UP reader rejects.
 
 **The actionable conclusion:** lower `time_scale`. The default of 10 buys ε-separation precision that domains without required concurrency do not need, and costs quadratically. Re-running the temporal track at `time_scale=1` or `2` is the obvious next experiment.
 
@@ -564,9 +584,9 @@ PLASP strictly dominates: it solves everything ABA solves bar two instances, and
 ## 3.7 Summary, and what to fix next
 
 1. **Plan length is the binding constraint.** Median solved plan is 10 steps, maximum 53, 88% at 20 or under. Iterative deepening pays for every horizon it rules out; nothing else in the data predicts coverage as well. Any large gain has to come from a better horizon strategy (a lower bound from a relaxed plan, or a planning-graph-style bound), not from a faster encoding.
-2. **`FORALL_EFFECTS` is the biggest feature gap** — 1,115 tasks refused up front, including whole ADL families.
+2. **`FORALL_EFFECTS` was the biggest feature gap — it is closed.** 1,115 tasks were refused up front, including whole ADL families; 1,066 of those (the ones not also carrying `TIMED_EFFECTS`) now reach the encoder. Re-checking the sweep's whole `UNSUPPORTED` column against HEAD leaves **284 tasks refused, every one on `TIMED_EFFECTS`** — timed initial literals are now the only declared gap between `PLASPPlanner` and these suites.
 3. **The temporal track is grounding-bound, at a constant you control.** 71% of encodable temporal tasks exhaust 8 GB in under three minutes at `time_scale=10`. Lowering it is the cheapest available improvement to the weakest track.
-4. **These numbers are a lower bound.** 1,463 tasks refused by the benchmarked version are accepted at HEAD. The numeric track in particular should be re-run before its coverage is quoted anywhere.
+4. **These numbers are a lower bound.** 1,463 tasks refused by the benchmarked version were already accepted before this change, and 1,066 more are now — 2,529 of the sweep's 2,813 `UNSUPPORTED` verdicts no longer hold. The numeric track and the ADL families in particular should be re-run before their coverage is quoted anywhere.
 5. **The benchmark input is dirtier than the planner.** 1,366 tasks — 15% of the sweep, and 95% of all `ERROR`s — never reached the encoder because the UP PDDL reader could not parse the IPC files. That is a ceiling on what *any* UP-based planner can score on these suites, not an ASPPlanners result.
 
 ## Reproducing
