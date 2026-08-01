@@ -7,7 +7,8 @@ The distilled tables of the sweep reported in [§3 of the top-level README](../R
 | | `PLASPPlanner-seq` | `ABAPlanner-ST` |
 |---|---|---|
 | configuration | `encoding=seq`, `max_horizon=1000`, `time_scale=10` | `semantics=ST`, `max_horizon=100`, `time_scale=2` |
-| tracks | classical, numeric, temporal | **classical only** |
+| tracks | classical, numeric, temporal | classical, numeric (temporal excluded) |
+| tracks *as run in this sweep* | classical, numeric, temporal | **classical only, and only 76 of its 145 domains** |
 | solved & validated | **1,004 / 6,738 (15%)** | 318 / 3,294 (10%) |
 | of *encodable* tasks | **1,004 / 5,600 (18%)** | 318 / 1,811 (18%) |
 | median runtime on solved | **10.5 s** | 19.3 s |

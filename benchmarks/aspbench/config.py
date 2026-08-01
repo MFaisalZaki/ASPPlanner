@@ -227,7 +227,7 @@ def write_default_experiment(exp_dir: str, time_limit: Optional[str] = None,
             'planner-tag': 'ABAPlanner-ST',
             'up-planner-name': 'ABAPlanner',
             'planner-params': {'max_horizon': 100, 'semantics': 'ST', 'time_scale': 2},
-            'tracks': ['classical'],
+            'tracks': ['classical', 'numeric'],      # temporal only is off; see the config's comment
         },
     }
     for name, body in starters.items():

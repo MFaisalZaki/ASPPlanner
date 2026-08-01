@@ -3,41 +3,41 @@
     "PLASPPlanner-seq": {
       "tracks": {
         "classical": {
-          "tasks": 3294,
-          "domains": 76,
-          "solved": 612,
-          "encodable": 2678,
-          "coverage_pct": 18.6,
-          "coverage_of_encodable_pct": 22.9,
+          "tasks": 4831,
+          "domains": 145,
+          "solved": 818,
+          "encodable": 4213,
+          "coverage_pct": 16.9,
+          "coverage_of_encodable_pct": 19.4,
           "status": {
-            "SOLVED": 612,
-            "TIMEOUT": 1763,
-            "MEMOUT": 206,
-            "KILLED": 74,
-            "ERROR": 616,
+            "SOLVED": 818,
+            "TIMEOUT": 2954,
+            "MEMOUT": 287,
+            "KILLED": 131,
+            "ERROR": 618,
             "EXHAUSTED": 23
           },
-          "median_solved_seconds": 5.3,
-          "median_solved_mb": 136.0
+          "median_solved_seconds": 7.5,
+          "median_solved_mb": 140.0
         },
         "numeric": {
-          "tasks": 3354,
-          "domains": 162,
-          "solved": 387,
-          "encodable": 2832,
-          "coverage_pct": 11.5,
-          "coverage_of_encodable_pct": 13.7,
+          "tasks": 1817,
+          "domains": 93,
+          "solved": 181,
+          "encodable": 1297,
+          "coverage_pct": 10.0,
+          "coverage_of_encodable_pct": 14.0,
           "status": {
-            "SOLVED": 387,
-            "TIMEOUT": 1683,
-            "MEMOUT": 367,
-            "KILLED": 392,
-            "ERROR": 25,
+            "SOLVED": 181,
+            "TIMEOUT": 492,
+            "MEMOUT": 286,
+            "KILLED": 335,
+            "ERROR": 23,
             "UNSUPPORTED": 497,
             "EXHAUSTED": 3
           },
-          "median_solved_seconds": 41.4,
-          "median_solved_mb": 184.4
+          "median_solved_seconds": 79.8,
+          "median_solved_mb": 243.7
         },
         "temporal": {
           "tasks": 90,

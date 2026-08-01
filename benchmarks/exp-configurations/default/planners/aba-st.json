@@ -6,11 +6,13 @@
         "semantics": "ST",
         "time_scale": 2
     },
-    "tracks": ["classical"],
+    "tracks": ["classical", "numeric"],
     "comment": [
         "The ABA backend does not honor `timeout`, so the search is bounded by",
         "`max_horizon` and the runner's own alarm is what stops it. Its framework",
         "grows with the square of the largest scaled duration, so it is kept off",
-        "the temporal track here; drop the `tracks` key to include it anyway."
+        "the temporal track here; drop the `tracks` key to include it anyway.",
+        "Only temporal is excluded: listing `classical` alone also withheld the",
+        "numeric track, which the engine refuses per-task as UNSUPPORTED anyway."
     ]
 }

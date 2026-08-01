@@ -53,6 +53,14 @@ def _prune(dirname: str) -> bool:
 TRACKS = ('classical', 'numeric', 'temporal')
 
 _COMMENT_RE = re.compile(r';[^\n]*')
+# A numeric comparison in a precondition or goal. The alternatives are ordered
+# longest-first: `<|<=` would match the `<` of `(<= ...)` and then fail on the
+# `=`, silently letting every `<=` and `>=` through.
+_NUMERIC_CMP_RE = re.compile(r'\((?:<=|>=|<|>)\s*\(')
+_NUMERIC_ASSIGN_RE = re.compile(
+    r'\((?:increase|decrease|assign|scale-up|scale-down)\s+\(\s*([a-z0-9_\-]+)')
+# The plan-quality accumulators, which say nothing about numeric planning.
+_COST_FLUENT_RE = re.compile(r'\A(?:total-cost|total-time)\Z')
 _IPC_YEAR_RE = re.compile(r'ipc[-_]?(\d{4})', re.IGNORECASE)
 _TRAILING_NUM_RE = re.compile(r'(\d+)(?!.*\d)')
 _NATURAL_RE = re.compile(r'(\d+)')
@@ -90,13 +98,38 @@ class Task:
 # Track classification
 # ----------------------------------------------------------------------
 
+def _functions_block(text: str) -> str:
+    """The ``(:functions ...)`` s-expression, or ``''`` if there is none.
+
+    Matched by paren balance rather than by regex: the block nests, and the
+    fluent names *declared* inside it must not be read as uses of them.
+    """
+    start = text.find('(:functions')
+    if start < 0:
+        return ''
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == '(':
+            depth += 1
+        elif text[i] == ')':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return text[start:]          # unbalanced; treat the rest of the file as the block
+
+
 def classify_domain(domain_file: str) -> str:
     """Read `domain_file` and say which track it belongs to.
 
-    Durative actions (or PDDL+ processes/events) make it temporal; a
-    ``(:functions ...)`` block or a ``:numeric-fluents`` requirement makes it
-    numeric; anything else is classical. Comments are stripped first so a
-    commented-out ``:durative-action`` does not mislabel a whole domain.
+    Durative actions (or PDDL+ processes/events) make it temporal. Numeric
+    needs more than a ``(:functions ...)`` block: IPC's standard STRIPS
+    encoding declares ``(total-cost)`` purely to score plans, so treating the
+    declaration as the signal files most of the classical suite -- sokoban,
+    woodworking, transport, and 66 other cost-annotated domains -- under
+    numeric. A domain is numeric only if it *uses* a fluent as state: compared
+    in a precondition or goal, or assigned somewhere other than a cost
+    accumulator. Comments are stripped first so a commented-out
+    ``:durative-action`` does not mislabel a whole domain.
     """
     try:
         with open(domain_file, 'r', errors='replace') as handle:
@@ -106,7 +139,13 @@ def classify_domain(domain_file: str) -> str:
     text = _COMMENT_RE.sub(' ', text).lower()
     if ':durative-action' in text or ':process' in text or ':event' in text:
         return 'temporal'
-    if '(:functions' in text or ':numeric-fluents' in text or ':fluents' in text:
+    if not ('(:functions' in text or ':numeric-fluents' in text or ':fluents' in text):
+        return 'classical'
+    body = text.replace(_functions_block(text), ' ')
+    if _NUMERIC_CMP_RE.search(body):
+        return 'numeric'
+    if any(not _COST_FLUENT_RE.match(name)
+           for name in _NUMERIC_ASSIGN_RE.findall(body)):
         return 'numeric'
     return 'classical'
 
