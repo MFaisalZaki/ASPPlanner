@@ -1,0 +1,98 @@
+{
+  "planners": {
+    "PLASPPlanner-seq": {
+      "tracks": {
+        "classical": {
+          "tasks": 3294,
+          "domains": 76,
+          "solved": 612,
+          "encodable": 2678,
+          "coverage_pct": 18.6,
+          "coverage_of_encodable_pct": 22.9,
+          "status": {
+            "SOLVED": 612,
+            "TIMEOUT": 1763,
+            "MEMOUT": 206,
+            "KILLED": 74,
+            "ERROR": 616,
+            "EXHAUSTED": 23
+          },
+          "median_solved_seconds": 5.3,
+          "median_solved_mb": 136.0
+        },
+        "numeric": {
+          "tasks": 3354,
+          "domains": 162,
+          "solved": 387,
+          "encodable": 2832,
+          "coverage_pct": 11.5,
+          "coverage_of_encodable_pct": 13.7,
+          "status": {
+            "SOLVED": 387,
+            "TIMEOUT": 1683,
+            "MEMOUT": 367,
+            "KILLED": 392,
+            "ERROR": 25,
+            "UNSUPPORTED": 497,
+            "EXHAUSTED": 3
+          },
+          "median_solved_seconds": 41.4,
+          "median_solved_mb": 184.4
+        },
+        "temporal": {
+          "tasks": 90,
+          "domains": 9,
+          "solved": 5,
+          "encodable": 90,
+          "coverage_pct": 5.6,
+          "coverage_of_encodable_pct": 5.6,
+          "status": {
+            "SOLVED": 5,
+            "TIMEOUT": 29,
+            "MEMOUT": 51,
+            "KILLED": 5
+          },
+          "median_solved_seconds": 15.0,
+          "median_solved_mb": 245.1
+        }
+      },
+      "total": {
+        "tasks": 6738,
+        "solved": 1004,
+        "validated": 1004,
+        "median_solved_seconds": 10.5,
+        "median_plan_length": 10.0
+      }
+    },
+    "ABAPlanner-ST": {
+      "tracks": {
+        "classical": {
+          "tasks": 3294,
+          "domains": 76,
+          "solved": 318,
+          "encodable": 1811,
+          "coverage_pct": 9.7,
+          "coverage_of_encodable_pct": 17.6,
+          "status": {
+            "SOLVED": 318,
+            "TIMEOUT": 171,
+            "MEMOUT": 948,
+            "KILLED": 374,
+            "ERROR": 647,
+            "UNSUPPORTED": 836
+          },
+          "median_solved_seconds": 19.3,
+          "median_solved_mb": 291.8
+        }
+      },
+      "total": {
+        "tasks": 3294,
+        "solved": 318,
+        "validated": 318,
+        "median_solved_seconds": 19.3,
+        "median_plan_length": 10.0
+      }
+    }
+  },
+  "sandbox": "sandbox"
+}
