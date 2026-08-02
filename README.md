@@ -287,8 +287,6 @@ Every number below comes from the checked-in tables in [results/](results/) — 
 
 ## 3.1 Setup
 
-One sweep, run 2026-07-29 → 2026-07-31 through the [aspbench](benchmarks/) harness on a slurm cluster (one CPU per task).
-
 | | |
 |---|---|
 | **Benchmark set** | 6,738 unique tasks over 247 domains; 10,032 (planner, task) pairs |
@@ -303,14 +301,6 @@ One sweep, run 2026-07-29 → 2026-07-31 through the [aspbench](benchmarks/) har
 | numeric | 1,817 | 93 | [pyPMT/numeric-domains](https://github.com/pyPMT/numeric-domains) |
 | temporal | 90 | 9 | [nergmada/ipc2018-temporal-track](https://github.com/nergmada/ipc2018-temporal-track) — the IPC-2018 temporal track as competed, 9 domains × 10 instances |
 
-A task's track is decided by **reading its domain file**, not by which repository it came from. Declaring a function is not enough to make a domain numeric: IPC's standard STRIPS encoding declares `(total-cost)` purely so plans can be scored, so a fluent has to be *used as state* — compared in a precondition, or assigned somewhere other than a cost accumulator. Filing on the declaration alone put 1,537 cost-annotated IPC instances (69 domains: `sokoban-*`, `woodworking-*`, `transport-*`, …) on the numeric track; they are classical, and are counted as such here.
-
-| track | previous sweep | this sweep |
-|---|---|---|
-| classical | 440 / 3,294 | **818 / 4,831** |
-| numeric | 273 / 3,354 | **181 / 1,817** |
-| temporal | 24 / 2,680 | 5 / 90 *(different set)* |
-
 ### Reading the status column
 
 | status | meaning |
@@ -323,13 +313,13 @@ A task's track is decided by **reading its domain file**, not by which repositor
 | `KILLED` | the scheduler reaped the job before the harness could write a result — read these as timeouts |
 | `EXHAUSTED` | `max_horizon` reached with no plan — the task may still be solvable at a deeper horizon |
 
-## 3.7 Summary, and what to fix next
+<!-- ## 3.7 Summary, and what to fix next
 
 1. **Plan length is the binding constraint.** Median solved plan is 10 steps, maximum 53, 89% at 20 or under — unchanged even though 36% more tasks are solved. Iterative deepening pays for every horizon it rules out; nothing else in the data predicts coverage as well. Any large gain has to come from a better horizon strategy (a lower bound from a relaxed plan, or a planning-graph-style bound), not from a faster encoding.
 2. **The feature gap that dominated the previous sweep is closed.** `PLASPPlanner` refuses nothing on classical and nothing on temporal. The 2,813 `UNSUPPORTED` verdicts of the previous run are down to 497, all numeric, all encoding-time — and the tasks that unblocked are worth **818 classical and 181 numeric solutions**, against 440 and 273 in the previous run over the same 6,648 tasks.
 3. **What remains refused is non-linear arithmetic.** 287 of the 497 refusals are a product of two fluents; another 100 are coefficients that will not scale to integers, 70 are conditional numeric effects, 40 an unrepresentable scale factor. That is a real boundary of a linear-integer ASP encoding, not an oversight — but conditional numeric effects (`petrobras`, 70 tasks) are the one item on that list that looks reachable.
 4. **The temporal track is grounding-bound, at a constant you control.** 57% of temporal tasks exhaust 8 GB in under two minutes at `time_scale=10`. Lowering it is the cheapest available improvement to the weakest track, and at 90 tasks the experiment costs a few hours.
-5. **The benchmark input is dirtier than the planner.** 641 tasks — 10% of the sweep, and 99.5% of all `ERROR`s — never reached the encoder because the UP PDDL reader could not parse the IPC files, six domains accounting for most of it. That is a ceiling on what *any* UP-based planner can score on these suites, not an ASPPlanners result.
+5. **The benchmark input is dirtier than the planner.** 641 tasks — 10% of the sweep, and 99.5% of all `ERROR`s — never reached the encoder because the UP PDDL reader could not parse the IPC files, six domains accounting for most of it. That is a ceiling on what *any* UP-based planner can score on these suites, not an ASPPlanners result. -->
 
 ## Reproducing
 
