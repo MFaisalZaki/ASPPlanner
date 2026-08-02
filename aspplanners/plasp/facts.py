@@ -303,6 +303,11 @@ def _equality_value_term(arg):
 # clear of an action parameter that happens to share its name.
 QUANTIFIED_PREFIX = 'Q_'
 
+# Fresh ASP variables binding a *static* fluent's value in an effect's rule body,
+# so the delta can be arithmetic the grounder does rather than a coefficient the
+# encoding has to state (see `_fold_static_effect_terms`).
+STATIC_EFFECT_PREFIX = 'RAWEFF'
+
 
 def _arg_term(arg):
     # Returns (term_str, asp_type, kind). Objects become `constant("name")`
@@ -582,7 +587,12 @@ class ASPLinearExpr(ASPTerm):
             ((expr, _in_clingo_range(coefficient, expr))
              for expr, coefficient in terms if coefficient != 0),
             key=lambda term: str(term[0]))
-        self.constant = _in_clingo_range(constant, context)
+        # A `str` constant is an already-rendered clingo term -- an effect whose
+        # static fluents were folded into arithmetic over `initialState` lookups
+        # (see `_fold_static_effect_terms`). It cannot be range-checked here
+        # because its value is not known until the grounder evaluates it.
+        self.constant = (constant if isinstance(constant, str)
+                         else _in_clingo_range(constant, context))
 
     @property
     def bindings(self):
@@ -684,7 +694,70 @@ def _reads_fluents(form):
     return any(coefficient != 0 for _expr, coefficient in form[0].values())
 
 
-def _effect_expr(form, term):
+def _static_addend(variable, coefficient):
+    """``coefficient * variable`` as a clingo arithmetic term.
+
+    The division is exact, so clingo's truncating ``/`` is safe here: every
+    denominator reaching this point is a factor of the task's scale, and the
+    looked-up value is therefore already a multiple of it (see
+    :func:`~aspplanners.plasp.rescale.static_numeric_folds`, which computes the
+    fold plan, folds those denominators into the scale, and checks the values
+    against it before anything is emitted).
+    """
+    numerator, denominator = coefficient.numerator, coefficient.denominator
+    if numerator == 1:
+        term = variable
+    elif numerator == -1:
+        term = f"-{variable}"
+    else:
+        term = f"({numerator}*{variable})"
+    return term if denominator == 1 else f"({term})/{denominator}"
+
+
+def _fold_static_effect_terms(form, static_folds, counter):
+    """Replace a form's *static*-fluent terms with initialState lookups.
+
+    A static fluent -- one no action ever writes -- has a value the grounder can
+    read straight out of the initial state, so a fractional coefficient on it is
+    not a coefficient the encoding has to state: it is arithmetic clingo does
+    once per parameter binding, while grounding. Petrobras' ``(decrease
+    (current_fuel ?sh) (/ (distance ?from ?to) 5))`` is the shape -- ``distance``
+    is a table, not state, so the delta is a number by the time the rule grounds.
+
+    This is the effect-side twin of what :func:`_duration_arithmetic` already
+    does for a duration, and it is confined to the fluents `static_folds` names
+    (only those with a fractional coefficient somewhere, which is exactly the set
+    that used to raise) so a task that encoded before is untouched.
+
+    Returns ``(rest, addends, lookups, bindings)``: the form with those terms
+    dropped, the arithmetic terms replacing them, the ``initialState`` body atoms
+    binding their values, and the ``has(...)`` atoms their arguments need.
+    """
+    rest, addends, lookups, bindings = {}, [], [], []
+    for key, (expr, coefficient) in form[0].items():
+        if coefficient == 0:
+            continue
+        if expr.up_expr.fluent().name not in static_folds:
+            rest[key] = (expr, coefficient)
+            continue
+        variable = f"{STATIC_EFFECT_PREFIX}{counter[0]}"
+        counter[0] += 1
+        lookups.append(f"initialState({str(expr)}, value({str(expr)}, {variable}))")
+        bindings += expr.bindings
+        addends.append(_static_addend(variable, coefficient))
+    return (rest, form[1]), addends, lookups, bindings
+
+
+def _delta_term(constant, addends):
+    """An effect's delta as one clingo term: its constant plus the folded terms."""
+    if not addends:
+        return str(constant)
+    if constant == 0:
+        return ' + '.join(addends)
+    return str(constant) + ' + ' + ' + '.join(addends)
+
+
+def _effect_expr(form, term, addends=()):
     """A numeric effect's delta or assigned value as a linear expression.
 
     A comparison clears a fractional coefficient by multiplying the whole
@@ -693,16 +766,32 @@ def _effect_expr(form, term):
     value, and the task-wide rescale scales values, not coefficients, so
     ``(increase (x) (/ (y) 2))`` stays fractional under any factor. Rejected
     here, ahead of ASPLinearExpr's own range check, for the sharper message.
+
+    A fractional coefficient on a *static* fluent is the exception, and it has
+    already been folded out of `form` into `addends` by the caller -- what is
+    left is the part the encoding really does have to state.
     """
     for expr, coefficient in form[0].values():
         if coefficient != 0 and coefficient.denominator != 1:
             raise NotImplementedError(
                 f"The numeric effect on {term} reads {expr} with the fractional "
                 f"coefficient {coefficient}, which no rescaling of the task can "
-                f"make whole (scaling moves the values, not the coefficients); "
-                f"the ASP encoding cannot state it. State the task in units "
-                f"that make the coefficient integral.")
-    return _as_linear_expr(form, context=f'the numeric effect on {term}')
+                f"make whole (scaling moves the values, not the coefficients) and "
+                f"{expr} is not static, so its value cannot be folded in at "
+                f"grounding time either; the ASP encoding cannot state it. State "
+                f"the task in units that make the coefficient integral.")
+    context = f'the numeric effect on {term}'
+    if not addends:
+        return _as_linear_expr(form, context=context)
+    # The folded terms ride in the expression's additive constant, which is then
+    # a clingo term rather than a literal -- the grounder evaluates it to the
+    # same number `numConst`/`numValue` would have carried. The constant they
+    # join is range-checked here rather than by ASPLinearExpr, which cannot see
+    # inside the term it is handed.
+    terms, constant = form
+    return ASPLinearExpr([(expr, coefficient) for expr, coefficient in terms.values()],
+                         _delta_term(_in_clingo_range(constant, context), addends),
+                         context)
 
 
 class ASPGroundedFluent(ASPTerm):
@@ -844,7 +933,7 @@ def _or_facts(disjunction, gid, owner=None, body_prefix=(), scope_vars=(),
 
 
 class ASPAction(ASPTerm):
-    def __init__(self, a, static_fluents=None, signature_guard=None):
+    def __init__(self, a, static_fluents=None, signature_guard=None, static_folds=None):
         # static_fluents: set of fluent names whose value is fixed by the
         # initial state (no action has them in its effects). Positive
         # preconditions on these are folded into the action signature body
@@ -859,7 +948,14 @@ class ASPAction(ASPTerm):
         # passes its start snap's declaration atom, which is both tighter (the
         # start's folded static preconditions carry over) and sound -- an end
         # snap can only ever fire for a binding whose start exists.
+        # static_folds: the subset of those fluents whose value an effect reads
+        # with a fractional coefficient, which is therefore looked up in the
+        # initial state at grounding time rather than stated as a coefficient
+        # (see `_fold_static_effect_terms`). Computed by rescale, which also puts
+        # the task's scale on a grid that makes the arithmetic exact.
         static_fluents = static_fluents or set()
+        self._static_folds = static_folds or {}
+        self._fold_counter = [0]
         self.up_action = a
         # Fluents this action reads as *false*, whose `holds(V, value(V,false))`
         # chain therefore has to exist from step 0 on (see the encoder).
@@ -940,16 +1036,18 @@ class ASPAction(ASPTerm):
                 continue
             if eff.kind == EffectKind.ASSIGN and not eff.fluent.type.is_bool_type():
                 term = str(target)
-                form = _linear_form(eff.value)
+                form, addends, lookups, folded = self._fold_statics(_linear_form(eff.value))
                 if _reads_fluents(form):
-                    expr = _effect_expr(form, term)
-                    body = _dedup([f'action({self._head})'] + quantified + expr.bindings)
+                    expr = _effect_expr(form, term, addends)
+                    body = _dedup([f'action({self._head})'] + quantified + folded
+                                  + expr.bindings + lookups)
                     head = f"numAssignExpr({self._head}, {term}, {str(expr)})"
                     self._postconditions.append(f"{head} :- {', '.join(body)}.")
                     self._postconditions += expr.declaration_rules(body)
                 else:
-                    value = _in_clingo_range(form[1], f'the numeric effect on {term}')
-                    body = _dedup([f'action({self._head})'] + quantified)
+                    value = _delta_term(
+                        _in_clingo_range(form[1], f'the numeric effect on {term}'), addends)
+                    body = _dedup([f'action({self._head})'] + quantified + folded + lookups)
                     head = f"numAssign({self._head}, {term}, {value})"
                     self._postconditions.append(f"{head} :- {', '.join(body)}.")
                 continue
@@ -962,18 +1060,22 @@ class ASPAction(ASPTerm):
             self._postconditions.append(f"{head} :- {body}.")
         for term, form in num_deltas.items():
             quantified = num_bindings.get(term, [])
+            form, addends, lookups, folded = self._fold_statics(form)
             if _reads_fluents(form):
-                expr = _effect_expr(form, term)
-                body = _dedup([f'action({self._head})'] + quantified + expr.bindings)
+                expr = _effect_expr(form, term, addends)
+                body = _dedup([f'action({self._head})'] + quantified + folded
+                              + expr.bindings + lookups)
                 head = f"numEffectExpr({self._head}, {term}, {str(expr)})"
                 self._postconditions.append(f"{head} :- {', '.join(body)}.")
                 self._postconditions += expr.declaration_rules(body)
                 continue
-            delta = _in_clingo_range(form[1], f'the numeric effect on {term}')
-            if delta == 0:
+            constant = _in_clingo_range(form[1], f'the numeric effect on {term}')
+            # A delta of a literal 0 is no effect at all; one that is only
+            # *arithmetic* over folded lookups is not known to be zero here.
+            if constant == 0 and not addends:
                 continue
-            body = _dedup([f'action({self._head})'] + quantified)
-            head = f"numEffect({self._head}, {term}, {delta})"
+            body = _dedup([f'action({self._head})'] + quantified + folded + lookups)
+            head = f"numEffect({self._head}, {term}, {_delta_term(constant, addends)})"
             self._postconditions.append(f"{head} :- {', '.join(body)}.")
 
         # Conditional effects (`when C then F := V`). The existential/sequential
@@ -1053,6 +1155,16 @@ class ASPAction(ASPTerm):
                 # condition each rather than a conjunction.
                 body = ', '.join(_dedup(effect_body + list(ca.bindings)))
                 self._postconditions.append(f"{cond_head} :- {body}.")
+
+    def _fold_statics(self, form):
+        """`_fold_static_effect_terms` against this action's fold plan.
+
+        A no-op -- and the identical form back -- for a task with no fold plan,
+        which is every task that encoded before this existed.
+        """
+        if not self._static_folds:
+            return form, [], [], []
+        return _fold_static_effect_terms(form, self._static_folds, self._fold_counter)
 
     def _disjunction_facts(self, disjunction, index):
         """orGroup/orDisjunct facts for one disjunctive precondition.

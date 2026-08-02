@@ -16,7 +16,9 @@ import pytest
 
 import aspplanners  # noqa: F401 -- registers the engine
 from unified_planning.engines import PlanGenerationResultStatus as Status
+from unified_planning.engines import CompilationKind
 from unified_planning.shortcuts import (
+    Equals,
     BoolType,
     Div,
     Fluent,
@@ -315,11 +317,38 @@ def test_a_fractional_constant_beside_a_fluent_term_is_rescaled():
     assert_plan_is_over_original_problem(problem, plan)
 
 
-def test_a_fractional_coefficient_in_an_effect_is_rejected():
-    """`x += y/2`: a comparison would be multiplied through, but an effect's
-    value cannot be, and the task-wide rescale scales values, not coefficients."""
+def test_a_fractional_coefficient_on_a_static_fluent_is_folded_in():
+    """`x += y/2` where `y` is static: the coefficient never reaches the
+    encoding, because the grounder can read y's value out of the initial state
+    and do the division itself. The task's scale is what makes it exact -- the
+    divisor 2 multiplies in, so y's stored value is even by construction."""
     def half(tick, x, y):
         tick.add_increase_effect(x(), Div(y(), 2))
+
+    problem = delta_problem(half, fluent_type=RealType())
+    planner = PLASPPlanner(problem, "seq")
+    assert planner.compiled_task.numeric_scale == 2
+
+    assert numeric_facts(planner.compiled_task, "numEffect(") == [
+        'numEffect(action(("tick")), variable(("x")), (RAWEFF0)/2) :- '
+        'action(action(("tick"))), '
+        'initialState(variable(("y")), value(variable(("y")), RAWEFF0)).'
+    ]
+
+    # y = 1, so each tick adds 1/2 and the threshold of 3 needs six of them.
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick"] * 6 + ["finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_fractional_coefficient_on_a_written_fluent_is_still_rejected():
+    """The same effect on a fluent an action *writes* has nothing to fold: a
+    comparison would be multiplied through, but an effect's value cannot be, and
+    the task-wide rescale scales values, not coefficients."""
+    def half(tick, x, y):
+        tick.add_increase_effect(x(), Div(y(), 2))
+        tick.add_increase_effect(y(), 0)      # y is no longer static
 
     problem = delta_problem(half, fluent_type=RealType())
     with pytest.raises(NotImplementedError, match="fractional coefficient"):
@@ -348,3 +377,75 @@ def test_a_non_linear_condition_is_still_rejected():
     problem.add_goal(GE(Times(x(), y()), 1))
     with pytest.raises(NotImplementedError, match="not linear"):
         PLASPPlanner(problem, "seq")
+
+
+# ---------------------------------------------------------------------------
+# Conditional numeric effects, lifted into preconditions by a UP compiler
+# ---------------------------------------------------------------------------
+
+def test_a_conditional_numeric_delta_is_compiled_away_and_solved():
+    """`when (y = 1) then x += 1`: caused/3 carries a variable's *new* value, so
+    a conditional increase has nowhere to put its condition. The planner asks UP
+    to lift it into the action's precondition, where both halves are ordinary
+    supported shapes -- petrobras' `sail` in miniature."""
+    def gated(tick, x, y):
+        tick.add_increase_effect(x(), 1, condition=Equals(y(), 1))
+
+    problem = delta_problem(gated)
+    planner = PLASPPlanner(problem, "seq")
+    assert planner.compilationlist == [
+        ['up_conditional_effects_remover', CompilationKind.CONDITIONAL_EFFECTS_REMOVING]]
+
+    # y is 1, so the guard always holds and each tick adds 1.
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick"] * 3 + ["finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_numeric_condition_on_a_conditional_effect_is_compiled_away():
+    """The other half of the same refusal: caused/3 reads an effect's condition
+    off precondition/3, which is boolean, so a numeric one has to move too."""
+    def gated(tick, x, y):
+        tick.add_effect(x(), 9, condition=GE(y(), 1))
+
+    problem = delta_problem(gated)
+    planner = PLASPPlanner(problem, "seq")
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_conditional_constant_assignment_still_takes_the_native_path():
+    """The shape the postcondition path can state on its own is left alone --
+    the compiler is asked for only what would otherwise be refused, so the ADL
+    families that encode natively today keep doing so."""
+    problem = delta_problem(lambda tick, x, y: None)
+    x, done = problem.fluent("x"), problem.fluent("done")
+    problem.action("tick").add_effect(x(), 9, condition=done())
+
+    planner = PLASPPlanner(problem, "seq")
+    assert planner.compilationlist == []
+    assert 'postcondition(action(("tick")), effect((cond,"tick",0)), variable(("x")), ' \
+           'value(variable(("x")), 9)) :- action(action(("tick"))).' \
+           in numeric_facts(planner.compiled_task, "postcondition(")
+
+
+def test_a_conditional_delta_over_a_static_fluent_combines_both_paths():
+    """Petrobras' `sail`, in miniature: the condition is numeric *and* the delta
+    reads a static fluent with a fractional coefficient. The compiler lifts the
+    condition into a precondition and the fold turns the coefficient into
+    grounding-time arithmetic; neither alone is enough."""
+    def gated(tick, x, y):
+        tick.add_increase_effect(x(), Div(y(), 2), condition=Equals(y(), 1))
+
+    problem = delta_problem(gated, fluent_type=RealType())
+    planner = PLASPPlanner(problem, "seq")
+    assert planner.compilationlist != []
+    assert planner.compiled_task.numeric_scale == 2
+
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick"] * 6 + ["finish"]
+    assert_plan_is_over_original_problem(problem, plan)

@@ -237,32 +237,6 @@ Clingo terms are integers, so happenings live on an integer time grid. `time_sca
 
 Lower it (`PLASPPlanner(problem, time_scale=1)`) when a domain has large, coprime durations and no required concurrency: **the encoding's remaining-duration recursion is quadratic in the largest scaled duration**, and this is the dominant cost on the temporal track — see [§3.5](#35-temporal).
 
-## Grounding
-
-The encoding is **not** pre-ground. gringo grounds the task either way, and the lifted encoding gives it as much to prune with — action signature rules bind parameters via `has(_, type(...))` and fold static preconditions into the rule body. Scaled up, that reaches the same program the Fast Downward reachability grounder does, byte for byte:
-
-| task | ground actions / atoms, lifted | with the grounder |
-|---|---|---|
-| gripper, 20 balls | 164 / 36447 | 164 / 36447 |
-| transport, 16 locations | 62 / 5641 | 62 / 5641 |
-| blocksworld, 9 blocks | 180 / 25018 | 180 / 25018 |
-
-**The one thing it cannot do is reachability analysis**, which prunes on *dynamic* preconditions where static folding is blind. If an action is narrowed only by a fluent some other action establishes — `use(?x, ?m)` gated by `loaded(?x, ?m)`, where `loaded` only ever holds for compatible pairs — the lifted program is quadratically bigger:
-
-| items × machines | ground actions, lifted | with the grounder |
-|---|---|---|
-| 4 × 4 | 20 | 8 |
-| 14 × 14 | **210** | **28** |
-
-For a domain shaped like that, ask for the grounder back — that is what `aspplanners.common.compilation.select_grounder` is for:
-
-```python
-from unified_planning.shortcuts import CompilationKind
-from aspplanners.common.compilation import REACHABILITY_GROUNDERS, select_grounder
-
-grounder = select_grounder(problem.kind, REACHABILITY_GROUNDERS)   # None if none applies
-planner = PLASPPlanner(problem, compilationlist=[[grounder, CompilationKind.GROUNDING]])
-```
 
 ## Customizing the compilation pipeline
 
@@ -331,17 +305,11 @@ One sweep, run 2026-07-29 → 2026-07-31 through the [aspbench](benchmarks/) har
 
 A task's track is decided by **reading its domain file**, not by which repository it came from. Declaring a function is not enough to make a domain numeric: IPC's standard STRIPS encoding declares `(total-cost)` purely so plans can be scored, so a fluent has to be *used as state* — compared in a precondition, or assigned somewhere other than a cost accumulator. Filing on the declaration alone put 1,537 cost-annotated IPC instances (69 domains: `sokoban-*`, `woodworking-*`, `transport-*`, …) on the numeric track; they are classical, and are counted as such here.
 
-`ABAPlanner-ST` did not run those 1,537 — see [§3.6](#36-plaspplanner-vs-abaplanner).
-
-**What changed since the previous sweep.** This run is on a version that declares `FORALL_EFFECTS`, `GENERAL_NUMERIC_PLANNING`, `FLUENTS_IN_NUMERIC_ASSIGNMENTS` and `CONDITIONAL_EFFECTS` (`573585b`, `af5e10c`, `82e4817`, `b88917f`) — the features the previous sweep's `UNSUPPORTED` column was almost entirely made of — and on the IPC-2018 temporal set rather than the 2,680-task multi-track archive. Classical and numeric cover the same 6,648 tasks as before; **temporal is not comparable**, it is a different and much smaller benchmark.
-
 | track | previous sweep | this sweep |
 |---|---|---|
 | classical | 440 / 3,294 | **818 / 4,831** |
 | numeric | 273 / 3,354 | **181 / 1,817** |
 | temporal | 24 / 2,680 | 5 / 90 *(different set)* |
-
-The raw run artifacts (per-task JSONs, tracebacks, slurm logs — ~20 GB) are not checked in; `sandbox*` and `benchmark-run/` are gitignored. The distilled tables are, under [results/](results/). See [Reproducing](#reproducing).
 
 ### Reading the status column
 
@@ -354,234 +322,6 @@ The raw run artifacts (per-task JSONs, tracebacks, slurm logs — ~20 GB) are no
 | `MEMOUT` | hit the 8 GB task limit |
 | `KILLED` | the scheduler reaped the job before the harness could write a result — read these as timeouts |
 | `EXHAUSTED` | `max_horizon` reached with no plan — the task may still be solvable at a deeper horizon |
-
-## 3.2 Headline coverage
-
-`PLASPPlanner-seq`, all three tracks:
-
-| track | solved | of all tasks | of *encodable* tasks |
-|---|---|---|---|
-| classical | **818** | 818 / 4,831 (17%) | 818 / 4,213 (**19%**) |
-| numeric | **181** | 181 / 1,817 (10%) | 181 / 1,297 (**14%**) |
-| temporal | **5** | 5 / 90 (6%) | 5 / 90 (**6%**) |
-| **total** | **1,004** | 1,004 / 6,738 (15%) | 1,004 / 5,600 (**18%**) |
-
-*Encodable* = attempted, minus `UNSUPPORTED`, minus the tasks the **UP PDDL reader** could not parse. Both columns matter and they say different things: the left one is raw IPC coverage, the right one is how the search does on the tasks that actually reach clingo.
-
-Full status breakdown:
-
-| planner | SOLVED | UNSUPPORTED | TIMEOUT | ERROR | MEMOUT | KILLED | EXHAUSTED | total |
-|---|---|---|---|---|---|---|---|---|
-| `PLASPPlanner-seq` | 1,004 | 497 | 3,475 | 641 | 624 | 471 | 26 | 6,738 |
-| `ABAPlanner-ST` (classical only) | 318 | 836 | 171 | 647 | 948 | 374 | 0 | 3,294 |
-
-Every one of the 1,322 `SOLVED` results across both planners passed plan validation — no unvalidated plan was counted.
-
-### The failure modes, separated
-
-**`UNSUPPORTED` is now a numeric-encoding question only.** `PLASPPlanner` refuses **nothing** on the classical and temporal tracks: the previous sweep's 2,813 refusals — the whole ADL family on `forall` effects, the numeric domains on `GENERAL_NUMERIC_PLANNING` — are gone, and the 497 that remain are all on the numeric track and all *encoding-time* refusals, where the encoder has read the task and declined a specific expression:
-
-| encoder refusal | tasks | domains |
-|---|---|---|
-| `A product of two numeric fluents is not linear` | 287 | the whole `nlnp-*` family, `zenotravel`, `sailing-wind-*`, `factory-robot`, `gear-car`, … |
-| `The numeric effect on X reads Y with a fractional coefficient` | 100 | `fo-farmland` (50), `hydropower` (30), `fo-sailing` (20) |
-| `The conditional numeric effect … is not supported` | 70 | `petrobras` |
-| `Making this task's numeric values integral needs a scale factor of 5e12` | 40 | `worksworld` |
-
-These are honest refusals rather than wrong answers, and they mark exactly where the linear-integer ASP encoding stops: products of two fluents, coefficients that do not scale to integers, and numeric effects under a condition.
-
-`ABAPlanner`'s 836 refusals are one feature — `CONDITIONAL_EFFECTS`, which is what every `(forall … (when …))` effect in this corpus expands into. **`PLASPPlanner` solves 174 of those 836** (`schedule` 37, `miconic-fulladl` 35, `elevators-00-adl` 34, `miconic-simpleadl` 34, `airport-adl` 11, `briefcaseworld` 7, `nurikabe-opt18` 7, `maintenance-opt14-adl` 5, `caldera-opt18` 4) — the concrete payoff of encoding `forall`/`when` rather than refusing it, and most of the classical track's gain over the previous sweep.
-
-**`ERROR` is the front end, not the planner.** Of 641 PLASP errors, **638 (99.5%)** are the UP PDDL reader failing on the benchmark files themselves:
-
-| exception | count | typical cause |
-|---|---|---|
-| `SyntaxError` | 224 | expressions the reader will not take (`total-time`, `duration`, `preference`) |
-| `ParseException` | 199 | malformed / unsupported PDDL syntax |
-| `UPProblemDefinitionError` | 129 | `Name p1 already defined` — an object and a predicate sharing a name |
-| `KeyError` | 46 | a type name used before it is declared |
-| `ParseSyntaxException` | 30 | same as `ParseException` |
-| `UPExpressionDefinitionError` | 10 | wrong fluent arity in the instance file |
-
-Seven domains account for 555 of the 641: `logistics00` (174), `elevators-00-full` (129), `blocks` (56), `psr-middle` and `psr-large` (50 each), `optical-telegraphs` and `philosophers` (48 each). The encoder never sees these tasks. The remaining 3 errors are `RecursionError`s in `plotting`.
-
-**`KILLED` is the 35-minute slurm wall firing before the harness's own 30-minute alarm.** 471 tasks, and they concentrate in a handful of numeric domains that ground slowly — `block-grouping` (167), `15-puzzle` (64), `pancake` (29), `2048` (16). Read them as timeouts; none of them was close to a plan.
-
-### Runtime on solved instances
-
-| planner / track | n | median | mean | q90 | max | median peak MB |
-|---|---|---|---|---|---|---|
-| PLASP, classical | 818 | 7.5 s | 132.7 s | 461.8 s | 1767.6 s | 140 |
-| PLASP, numeric | 181 | 79.8 s | 573.1 s | 1805.9 s | 2077.3 s | 244 |
-| PLASP, temporal | 5 | 15.0 s | 15.8 s | — | 40.8 s | 245 |
-| PLASP, all | 1,004 | 10.5 s | 211.5 s | 744.0 s | 2077.3 s | 148 |
-| ABA, classical | 318 | 19.3 s | 176.4 s | 554.5 s | 1772.4 s | 292 |
-
-The distribution is sharply bimodal: **50% of solved tasks finish in under 10 s and 69% in under 60 s**, and the rest run into the wall (q90 = 744 s, q95 = 1482 s). Iterative deepening either reaches the right horizon quickly or spends the whole budget grinding through horizons that have no plan.
-
-The memouts say the same thing from the other side: a PLASP `MEMOUT` reaches a median peak of **7.3 GB** after a median of **247 s** (classical) or **220 s** (numeric). Where memory is the binding limit it binds early, during grounding — not after a long search.
-
-### The real ceiling is plan length, not instance size
-
-| plan length | solved instances |
-|---|---|
-| 0–5 | 186 (19%) |
-| 6–10 | 358 (36%) |
-| 11–15 | 206 (21%) |
-| 16–20 | 144 (14%) |
-| 21–30 | 71 (7%) |
-| 31+ | 39 (4%) |
-
-Median 10, maximum **53** — unchanged from the previous sweep despite 36% more solved tasks. Because the horizon is deepened one step at a time and each horizon is a fresh satisfiability question, cost grows with the *optimal step count*, and almost nothing past ~30 steps is reachable in 30 minutes. This is the single best predictor of whether an instance is solved — better than object count, better than domain. It also explains the shape of the per-domain results below: domains with short plans are solved nearly completely, domains with long plans are solved not at all.
-
-## 3.3 Classical
-
-**818 / 4,831 (17%); 818 / 4,213 encodable (19%).** Full tables: [results/classical/](results/classical/).
-
-| status | count | share of encodable |
-|---|---|---|
-| TIMEOUT | 2,954 | 70% |
-| SOLVED | 818 | 19% |
-| MEMOUT | 287 | 7% |
-| KILLED | 131 | 3% |
-| EXHAUSTED | 23 | 1% |
-| UNSUPPORTED | **0** | — |
-
-The classical track is **search-bound**: 70% of everything the encoder accepts runs out of time, and only 7% runs out of memory. Grounding is not the problem here — finding the horizon is. Nothing on this track is refused any more, so `encodable` now differs from `attempted` only by the 618 tasks the PDDL reader rejected.
-
-84 of 145 domains yield at least one solved instance:
-
-| domain | solved | rest |
-|---|---|---|
-| psr-small | 49 / 50 | TIMEOUT 1 |
-| schedule | 37 / 150 | TIMEOUT 113 |
-| miconic-fulladl | 35 / 150 | TIMEOUT 111, MEMOUT 4 |
-| elevators-00-adl | 34 / 151 | TIMEOUT 116, ERROR 1 |
-| miconic-simpleadl | 34 / 150 | TIMEOUT 116 |
-| mprime | 32 / 35 | TIMEOUT 2, KILLED 1 |
-| no-mprime | 31 / 35 | TIMEOUT 2, KILLED 2 |
-| elevators-00-strips | 30 / 150 | TIMEOUT 120 |
-| miconic | 30 / 150 | TIMEOUT 120 |
-| movie | **30 / 30** | — |
-| blocks | 20 / 136 | ERROR 56, TIMEOUT 54, KILLED 6 |
-| ged-opt14-strips | **20 / 20** | — |
-| mystery | 18 / 30 | TIMEOUT 10, EXHAUSTED 1, KILLED 1 |
-| no-mystery | 18 / 30 | TIMEOUT 10, EXHAUSTED 1, KILLED 1 |
-| data-network-opt18 | 15 / 20 | TIMEOUT 5 |
-| blocks-3op | 14 / 30 | TIMEOUT 16 |
-
-The four ADL families in that list — `schedule`, `miconic-fulladl`, `miconic-simpleadl`, `elevators-00-adl` — contributed **nothing at all** to the previous sweep; all 601 of their tasks were refused on `forall` effects. They now behave exactly like their STRIPS siblings: a clean prefix solved, the rest timing out, for 140 solved between them.
-
-The pattern otherwise is the plan-length ceiling: `psr-small`, `movie` and `mprime` have short plans and are solved essentially completely; `elevators-00-strips` and `miconic` each solve every instance of sizes `s1`–`s6` and nothing from `s7` on. The 23 `EXHAUSTED` results (21 in `elevators-00-full`, one each in `mystery` and `no-mystery`) reached `max_horizon=1000` without a plan — the only classical tasks where the search bound, rather than a resource limit, ended the run.
-
-## 3.4 Numeric
-
-**181 / 1,817 (10%); 181 / 1,297 encodable (14%).** Full tables: [results/numeric/](results/numeric/).
-
-| status | count | share of encodable |
-|---|---|---|
-| TIMEOUT | 492 | 38% |
-| KILLED | 335 | 26% |
-| MEMOUT | 286 | 22% |
-| SOLVED | 181 | 14% |
-| EXHAUSTED | 3 | <1% |
-
-Every task here is a genuinely numeric one, from `numeric-domains`; the cost-annotated IPC instances that used to pad this track are counted under §3.3 where they belong. The 181 are up from 96 in the previous sweep: declaring `GENERAL_NUMERIC_PLANNING` and `FLUENTS_IN_NUMERIC_ASSIGNMENTS` turned whole domains from a refusal into a run.
-
-Unlike classical, this track is not purely search-bound — `KILLED` and `MEMOUT` together account for nearly half of what the encoder accepts. These are the domains that ground slowly or hugely, and they fail before the search gets a chance.
-
-35 of 93 domains yield at least one solved instance:
-
-| domain | solved | rest |
-|---|---|---|
-| plotting | **76 / 87** | KILLED 5, EXHAUSTED 3, ERROR 3 |
-| mprime | 24 / 30 | TIMEOUT 6 |
-| minecraft-sword-advanced | **20 / 20** | — |
-| counters | 10 / 55 | TIMEOUT 44, KILLED 1 |
-| minecraft-pogo-advanced | 9 / 20 | TIMEOUT 11 |
-| block-grouping | 7 / 192 | KILLED 167, TIMEOUT 17, MEMOUT 1 |
-| pancake | 5 / 50 | KILLED 29, TIMEOUT 9, MEMOUT 7 |
-| drone | 2 / 20 | TIMEOUT 18 |
-| forestfire | 2 / 20 | TIMEOUT 18 |
-| delivery | 1 / 20 | MEMOUT 10, TIMEOUT 9 |
-| elevators | 1 / 30 | TIMEOUT 29 |
-| fo-counters | 1 / 20 | TIMEOUT 19 |
-
-`plotting` is the single largest gain of the sweep: 87 tasks refused outright before, 76 solved now. `minecraft-sword-advanced` — short plans, small numeric state — goes 20/20. `counters` and `block-grouping` (7/192) are the opposite: small tasks whose plans are long, and they fail almost completely. The tail is thin: outside the top three domains nothing reaches half coverage, and 58 of 93 domains solve nothing at all.
-
-The refusals that remain are concentrated and diagnostic: the 13 `nlnp-*` and `sailing-wind-*` domains built on non-linear arithmetic (287 tasks), `fo-farmland`/`hydropower`/`fo-sailing` on fractional coefficients (100), `petrobras` on conditional numeric effects (70), and `worksworld` on a scale factor of 5·10¹² (40). Non-linear arithmetic is the single feature standing between `PLASPPlanner` and the rest of this track.
-
-## 3.5 Temporal
-
-**5 / 90 (6%).** This is the weak track, and the reason is specific and measurable. Full tables: [results/temporal/](results/temporal/).
-
-Note that this is the IPC-2018 temporal track — 9 domains × 10 instances, the hardest temporal benchmark in circulation — not the older multi-track archive the previous sweep used. The two numbers are not comparable.
-
-| status | count | share |
-|---|---|---|
-| **MEMOUT** | **51** | **57%** |
-| TIMEOUT | 29 | 32% |
-| SOLVED | 5 | 6% |
-| KILLED | 5 | 6% |
-| UNSUPPORTED | **0** | — |
-
-**The temporal encoding does not run out of time — it runs out of memory, early.** The 51 memouts reach a median peak of **7.3 GB after a median of 117 seconds**: they exhaust an 8 GB budget in under two minutes, before search has meaningfully started. That is grounding, not solving. The direct cause is documented in [§2](#time_scale): the remaining-duration recursion is **quadratic in the largest scaled duration**, and the sweep ran at `time_scale=10`, which multiplies every duration by ten before that recursion is ground.
-
-| domain | solved | rest |
-|---|---|---|
-| airport-temporal-strips | 2 / 10 | MEMOUT 8 |
-| quantum_circuit | 2 / 10 | MEMOUT 5, TIMEOUT 3 |
-| Cushing | 1 / 10 | TIMEOUT 9 |
-| Floortile | 0 / 10 | TIMEOUT 10 |
-| Parking | 0 / 10 | TIMEOUT 7, MEMOUT 3 |
-| Mapanalyser | 0 / 10 | MEMOUT 8, KILLED 2 |
-| road-traffic-accident | 0 / 10 | MEMOUT 8, KILLED 2 |
-| sokoban | 0 / 10 | MEMOUT 9, KILLED 1 |
-| trucks-time-strips | 0 / 10 | MEMOUT 10 |
-
-The split is clean: the three domains that solve anything (`Cushing`, `quantum_circuit`, `airport-temporal-strips`) are the ones whose durations are small or uniform, and they time out rather than memout. Every domain with large heterogeneous real durations — `trucks-time-strips`, `sokoban`, `Mapanalyser`, `road-traffic-accident` — memouts wholesale.
-
-The solved plans are correct time-triggered plans with genuine concurrency:
-
-| task | plan | makespan | time | peak MB |
-|---|---|---|---|---|
-| `airport-temporal-strips:4` | 20 snap actions | 129.0 | 15.0 s | 281 |
-| `airport-temporal-strips:10` | 18 | 127.8 | 17.2 s | 278 |
-| `quantum_circuit:3` | 5 | 17.0 | 40.8 s | 245 |
-| `quantum_circuit:1` | 4 | 12.5 | 4.1 s | 192 |
-| `Cushing:pfile1` | 6 | 8.0 | 1.8 s | 139 |
-
-The encoding is right; it is the discretisation constant that is too expensive. **The actionable conclusion is unchanged: lower `time_scale`.** The default of 10 buys ε-separation precision that domains without required concurrency do not need, and costs quadratically. Re-running the temporal track at `time_scale=1` or `2` is still the obvious next experiment — and it is now cheap, at 90 tasks.
-
-## 3.6 `PLASPPlanner` vs `ABAPlanner`
-
-`ABAPlanner-ST` is kept off the **temporal** track — the ABA framework grows with the square of the largest scaled duration — so its planner config carries `"tracks": ["classical", "numeric"]`. Its temporal tasks were never run, and are absent from [results/temporal/](results/temporal/) rather than recorded as 0/n.
-
-At the time of this sweep that config read `["classical"]`, and the 1,537 cost-annotated instances were still filed under numeric, so ABA was never dispatched them: it attempted 3,294 of the classical track's 4,831 tasks, over 76 of its 145 domains. It shows as `—` rather than 0 for the other 69 in [results/classical/](results/classical/), and its headline coverage is over the smaller denominator. **Closing that gap needs a re-run, not a re-label.** The comparison below is restricted to the 3,294 tasks both planners actually attempted.
-
-| | `PLASPPlanner-seq` | `ABAPlanner-ST` |
-|---|---|---|
-| solved | **612** | 318 |
-| encodable | 2,678 | 1,811 |
-| coverage of encodable | **23%** | 18% |
-| median runtime (solved) | **5.3 s** | 19.3 s |
-| median peak memory (solved) | **136 MB** | 292 MB |
-| MEMOUT | 206 (8% of encodable) | **948 (52%)** |
-| TIMEOUT + KILLED | 1,837 | 545 |
-| UNSUPPORTED | **0** | 836 |
-
-Head to head:
-
-| | tasks |
-|---|---|
-| both solved | 314 |
-| **PLASP only** | **298** |
-| **ABA only** | **4** |
-| neither | 2,678 |
-
-PLASP strictly dominates: it solves everything ABA solves bar four instances (`blocks:probBLOCKS-10-1`, `driverlog:pfile2`, `hiking-opt14-strips:ptesting-1-2-5`, `zenotravel:pfile7`), and on those four it timed out rather than failing. **PLASP is the default for a reason** — the ABA reduction is 4× slower at the median, 2× heavier, and its failure mode is memory: 52% of the tasks it accepts exhaust 8 GB, against 8% for PLASP, because the STRIPS-to-ABA reduction materialises an argumentation framework over the ground task. Its 374 `KILLED` are a consequence of `ABAPlanner` not honoring `timeout` — the scheduler reaps the job instead of the harness recording a clean `TIMEOUT`.
-
-The gap has widened since the previous sweep (126 PLASP-only tasks then, 298 now) almost entirely because of `CONDITIONAL_EFFECTS`: ABA still refuses all 836 ADL tasks, and PLASP now solves 174 of them.
 
 ## 3.7 Summary, and what to fix next
 
@@ -623,8 +363,3 @@ The checked-in tables under [results/](results/) are distilled from the finished
 ```bash
 python results/generate_results.py --sandbox-dir sandbox-results/sandbox
 ```
-
-Two caveats when reading a sweep of your own:
-
-- `task_id` is `suite:domain:instance` and does **not** include the IPC year, so a domain appearing in two IPC editions collides — the previous sweep lost 120 temporal tasks that way. The IPC-2018 temporal set has no such duplicates, so this run's 10,032 generated commands produce exactly 10,032 result rows.
-- `MISSING` in the raw summary means "no result file for a (planner, task) pair", which conflates *never scheduled* (`ABAPlanner-ST` on numeric and temporal) with *lost*. Check the planner config's `tracks` key before reading a zero as a failure; `results/generate_results.py` drops the never-scheduled pairs rather than recording them as 0/n.

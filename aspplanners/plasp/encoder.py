@@ -24,6 +24,7 @@ from aspplanners.plasp.rescale import (
     apply_duration_scales,
     duration_fluent_scales,
     scale_numeric_constants,
+    static_numeric_folds,
 )
 from aspplanners.common.compilation import (
     compose_map_backs,
@@ -186,7 +187,14 @@ class PLASPEncoder:
         # than waiting for initialize_fluent_defaults, because hoisting that call
         # above the split would feed zeros into the time grid (see
         # common.temporal._duration_values).
-        numeric_scale = scale_numeric_constants(new_problem)
+        #
+        # The fold plan is worked out here, on the same actions the factor is
+        # computed from, and handed to the fact builder further down: a static
+        # fluent an effect reads with a fractional coefficient is looked up in
+        # the initial state at grounding time instead, and the factor is what
+        # makes that lookup divide exactly.
+        static_folds = static_numeric_folds(new_problem)
+        numeric_scale = scale_numeric_constants(new_problem, static_folds)
 
         # Both of the above restate an action rather than replacing it, so one
         # map covers them. It is built here rather than as the actions are made
@@ -242,6 +250,20 @@ class PLASPEncoder:
                 modified_fluent_names.add(eff.fluent._content.payload.name)
         static_fluent_names = {f.name for f in new_problem.fluents if f.name not in modified_fluent_names}
 
+        # The fold plan was drawn up before the compilers ran, against the
+        # actions as the task stated them. Nothing between there and here adds an
+        # effect target -- the conditional-effect remover redistributes effects
+        # across action variants and the durative split copies them into snaps --
+        # so this holds. It is asserted rather than assumed because the failure
+        # would be silent: folding a fluent an action *does* write would read its
+        # initial value at every step and return a wrong plan, not an error.
+        drifted = set(static_folds) - static_fluent_names
+        if drifted:
+            raise NotImplementedError(
+                f"Fluent(s) {sorted(drifted)} were static when the numeric scale was "
+                f"computed and are written by an action after compilation, so their "
+                f"values cannot be folded into effect arithmetic as planned.")
+
         # Fill in default values (bool False, int 0) BEFORE the initial-state
         # facts are emitted: an uninitialized numeric fluent would otherwise
         # have no holds/3 chain, which silently disables every numeric
@@ -262,7 +284,7 @@ class PLASPEncoder:
         # step-0 fact it can never be satisfied. That is what makes
         # up_negative_conditions_remover unnecessary -- the encoding tracks the
         # false value directly instead of a task needing a mirror fluent.
-        asp_actions = [(ASPAction(action, static_fluent_names, guard), guard)
+        asp_actions = [(ASPAction(action, static_fluent_names, guard, static_folds), guard)
                        for action, guard in asp_actions]
         goal_terms = list(chain.from_iterable(
             self._generate_asp_goal_state(g) for g in new_problem.goals))

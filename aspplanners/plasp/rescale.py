@@ -39,7 +39,7 @@ from fractions import Fraction
 from math import gcd
 
 from aspplanners.common.temporal import all_effects, durative_actions
-from aspplanners.plasp.facts import _is_numeric_fnode
+from aspplanners.plasp.facts import _is_numeric_fnode, _linear_form
 
 # Denominators past this are not a task stated in awkward units, they are a task
 # stated in the wrong ones; scaling by such a factor would make the integers
@@ -139,12 +139,109 @@ def apply_duration_scales(task, scales) -> None:
                 Fraction(value.constant_value()) * scales[fluent.name])
 
 
-def scale_numeric_constants(task) -> int:
+def _static_fluent_names(task):
+    """Fluent names no action ever writes -- their value is the initial one."""
+    written = {effect.fluent.fluent().name
+               for action in task.actions
+               for effect in all_effects(action)}
+    return {fluent.name for fluent in task.fluents if fluent.name not in written}
+
+
+def static_numeric_folds(task):
+    """``{fluent name: divisor}`` for the static fluents an effect reads with a
+    fractional coefficient.
+
+    ``(decrease (current_fuel ?sh) (/ (distance ?from ?to) 5))`` is not a
+    coefficient the encoding has to state, because ``distance`` is static: the
+    grounder can read its value out of the initial state and do the division
+    itself, once per parameter binding
+    (:func:`~aspplanners.plasp.facts._fold_static_effect_terms`). What it needs
+    in return is for that division to be exact, which is this function's other
+    half -- :func:`scale_numeric_constants` multiplies the divisors in, on top of
+    the factor the task's own values need, so every looked-up value is a multiple
+    of its divisor by construction.
+
+    A duration fluent is left out: it sits out the task-wide factor and rides its
+    own grid instead (:func:`duration_fluent_scales`), so nothing here can
+    promise what its stored value is a multiple of.
+    """
+    static = _static_fluent_names(task) - _duration_fluent_names(task)
+    if not static:
+        return {}
+
+    folds = {}
+    for action in task.actions:
+        for effect in all_effects(action):
+            if not (effect.fluent.type.is_int_type() or effect.fluent.type.is_real_type()):
+                continue
+            try:
+                terms, _constant = _linear_form(effect.value)
+            except (NotImplementedError, ZeroDivisionError):
+                # Not a shape the encoding states at all; the fact builder says
+                # so, with a message about the shape rather than about scaling.
+                continue
+            for expr, coefficient in terms.values():
+                denominator = coefficient.denominator
+                if denominator == 1 or coefficient == 0:
+                    continue
+                name = expr.up_expr.fluent().name
+                if name in static:
+                    folds[name] = _lcm(folds.get(name, 1), denominator)
+    return folds
+
+
+def _lcm(a, b):
+    return a * b // gcd(a, b)
+
+
+def _check_folds_divide(task, folds, scale):
+    """Every folded fluent's scaled values are a multiple of its divisor.
+
+    Guaranteed by construction -- `scale` is a multiple of every divisor times
+    the factor clearing the values' own denominators -- so this is a check on the
+    reasoning, not on the task. It runs anyway because the failure it guards
+    against is silent: clingo's ``/`` truncates, so an inexact fold would return
+    a wrong plan rather than raise.
+    """
+    def check(name, value, divisor):
+        if divisor is None or not _is_numeric_value(value):
+            return
+        scaled = Fraction(value.constant_value())
+        if (scaled / divisor).denominator != 1:
+            raise NotImplementedError(
+                f"Fluent {name!r} is read by a numeric effect with a coefficient of "
+                f"denominator {divisor}, and its value {scaled} (after scaling by "
+                f"{scale}) is not a multiple of it, so folding that value in at "
+                f"grounding time would divide inexactly. State the task in units "
+                f"that make the coefficient integral.")
+
+    # The initial state comes from the same three places `_walk` scales, and all
+    # three can reach a folded fluent: the values a task states, a fluent's own
+    # default, and the per-type default `initialize_fluent_defaults` falls back
+    # to. The last is keyed by type rather than by fluent, so it is checked
+    # against every divisor rather than against its own.
+    for fluent_exp, value in task.explicit_initial_values.items():
+        check(fluent_exp.fluent().name, value, folds.get(fluent_exp.fluent().name))
+    for fluent, value in task.fluents_defaults.items():
+        check(fluent.name, value, folds.get(fluent.name))
+    for _user_type, value in task.initial_defaults.items():
+        for name, divisor in folds.items():
+            check(name, value, divisor)
+
+
+def scale_numeric_constants(task, folds=None) -> int:
     """Multiply `task`'s numeric values by the least factor making them whole.
 
     Returns that factor, and mutates `task` only when it is greater than 1 -- a
     task whose numbers are already integers is left byte-for-byte alone, which
     is what keeps this pass invisible to everything that worked before it.
+
+    "Whole" covers one thing beyond the values themselves: a fractional
+    coefficient on a *static* fluent, whose value the fact builder folds into the
+    effect's arithmetic. Those divisors multiply the factor rather than joining
+    its least common multiple -- the values have to be a multiple of the divisor
+    *after* their own denominators are cleared, not merely integral
+    (see :func:`static_numeric_folds`).
     """
     # A fluent read as a durative action's duration keeps the task's own units:
     # the encoding reads its value straight out of the initialState fact and
@@ -158,13 +255,23 @@ def scale_numeric_constants(task) -> int:
     scale = 1
     for denominator in denominators:
         scale = scale * denominator // gcd(scale, denominator)
+
+    # The caller passes the plan it will hand the fact builder, so the divisors
+    # this factor covers and the ones that get folded cannot drift apart.
+    folds = static_numeric_folds(task) if folds is None else folds
+    fold_factor = 1
+    for divisor in folds.values():
+        fold_factor = _lcm(fold_factor, divisor)
+    scale *= fold_factor
+
     if scale == 1:
         return 1
 
-    _check_scale(scale, denominators)
+    _check_scale(scale, denominators, folds.values())
     _check_bounded_types(task, scale)
     _check_duration_fluents(scaled_fluents & duration_fluents, scale)
     _walk(task, scale, duration_fluents)
+    _check_folds_divide(task, folds, scale)
     return scale
 
 
@@ -336,17 +443,20 @@ class _State:
 # Guards
 # ---------------------------------------------------------------------------
 
-def _check_scale(scale, denominators):
+def _check_scale(scale, denominators, fold_divisors=()):
     """Cap the factor itself. How big the scaled *values* get is checked where
     they are emitted, by `facts._in_clingo_range`, which sees the actual numbers
     rather than a bound on them."""
-    if scale > MAX_NUMERIC_SCALE:
-        raise NotImplementedError(
-            f"Making this task's numeric values integral needs a scale factor of "
-            f"{scale}, the least common multiple of the denominators "
-            f"{sorted(denominators)}; the ASP encoding caps it at "
-            f"{MAX_NUMERIC_SCALE}. State the task in units that make its numbers "
-            f"whole.")
+    if scale <= MAX_NUMERIC_SCALE:
+        return
+    because = f"the least common multiple of the denominators {sorted(denominators)}"
+    if fold_divisors:
+        because += (f", times {sorted(set(fold_divisors))} for the fractional "
+                    f"coefficients folded into effect arithmetic")
+    raise NotImplementedError(
+        f"Making this task's numeric values integral needs a scale factor of "
+        f"{scale}, {because}; the ASP encoding caps it at {MAX_NUMERIC_SCALE}. "
+        f"State the task in units that make its numbers whole.")
 
 
 def _check_bounded_types(task, scale):
@@ -384,4 +494,4 @@ def _check_duration_fluents(conflicting, scale):
 
 
 __all__ = ['scale_numeric_constants', 'duration_fluent_scales',
-           'apply_duration_scales', 'MAX_NUMERIC_SCALE']
+           'apply_duration_scales', 'static_numeric_folds', 'MAX_NUMERIC_SCALE']
