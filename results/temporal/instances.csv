@@ -1,91 +1,91 @@
 planner,suite,domain,instance,ipc,status,validated,plan_length,makespan,parse_seconds,solve_seconds,total_seconds,peak_memory_mb,reason
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile1,2018,SOLVED,True,6,8.0,0.076,0.559,1.774,138.59,
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile11,2018,TIMEOUT,,,,0.133,,1800.261,427.2,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile12,2018,TIMEOUT,,,,0.133,,1800.28,468.3,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile14,2018,TIMEOUT,,,,0.134,,1800.347,490.5,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile16,2018,TIMEOUT,,,,0.148,,1800.357,515.5,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile19,2018,TIMEOUT,,,,0.151,,1800.398,610.16,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile3,2018,TIMEOUT,,,,0.085,,1800.137,301.05,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile6,2018,TIMEOUT,,,,0.1,,1800.206,320.2,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile7,2018,TIMEOUT,,,,0.108,,1800.183,338.23,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile9,2018,TIMEOUT,,,,0.118,,1800.245,382.92,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p442-1,2018,TIMEOUT,,,,0.363,,1801.251,780.32,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p442-4,2018,TIMEOUT,,,,0.396,,1801.366,826.75,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p442-5,2018,TIMEOUT,,,,0.39,,1801.269,809.17,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p443-2,2018,TIMEOUT,,,,0.359,,1801.78,949.88,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p443-3,2018,TIMEOUT,,,,0.404,,1801.515,1084.68,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p552-2,2018,TIMEOUT,,,,0.417,,1802.255,1235.5,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p552-4,2018,TIMEOUT,,,,0.414,,1802.333,1176.21,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p553-1,2018,TIMEOUT,,,,0.442,,1803.865,1718.39,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p553-3,2018,TIMEOUT,,,,0.447,,1803.744,1606.11,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Floortile,p553-5,2018,TIMEOUT,,,,0.438,,1804.452,1817.61,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile3-4-2-0-1,2018,MEMOUT,,,,0.262,,110.782,7697.76,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile3-4-2-0-3,2018,KILLED,,,,,,,,
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-2-2-0-2,2018,MEMOUT,,,,0.521,,132.094,7713.49,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-2-3-0-1,2018,MEMOUT,,,,0.542,,115.529,7652.5,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-2-3-0-2,2018,MEMOUT,,,,0.499,,115.418,7652.18,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-3-2-0-1,2018,MEMOUT,,,,0.553,,192.749,7601.74,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-3-2-0-3,2018,MEMOUT,,,,0.529,,124.244,7694.93,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile1,2018,SOLVED,True,6,8.0,0.08,0.709,2.118,141.54,
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile11,2018,TIMEOUT,,,,0.132,,1800.266,426.95,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile12,2018,TIMEOUT,,,,0.131,,1800.226,468.68,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile14,2018,TIMEOUT,,,,0.136,,1800.322,487.4,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile16,2018,TIMEOUT,,,,0.136,,1800.307,515.67,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile19,2018,TIMEOUT,,,,0.16,,1800.396,610.68,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile3,2018,TIMEOUT,,,,0.087,,1800.123,301.11,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile6,2018,TIMEOUT,,,,0.108,,1800.2,320.0,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile7,2018,TIMEOUT,,,,0.097,,1800.179,335.49,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Cushing,pfile9,2018,TIMEOUT,,,,0.133,,1800.228,383.8,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p442-1,2018,TIMEOUT,,,,0.413,,1801.134,778.48,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p442-4,2018,TIMEOUT,,,,0.365,,1801.113,873.55,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p442-5,2018,TIMEOUT,,,,0.385,,1801.084,811.69,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p443-2,2018,TIMEOUT,,,,0.343,,1801.681,950.36,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p443-3,2018,TIMEOUT,,,,0.359,,1801.613,1083.84,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p552-2,2018,TIMEOUT,,,,0.453,,1802.396,1230.1,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p552-4,2018,TIMEOUT,,,,0.447,,1802.154,1177.76,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p553-1,2018,TIMEOUT,,,,0.443,,1803.998,1721.1,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p553-3,2018,TIMEOUT,,,,0.425,,1803.556,1608.65,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Floortile,p553-5,2018,TIMEOUT,,,,0.399,,1804.39,1938.22,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile3-4-2-0-1,2018,MEMOUT,,,,0.212,,106.016,7697.44,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile3-4-2-0-3,2018,MEMOUT,,,,0.243,,115.304,6626.95,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-2-2-0-2,2018,MEMOUT,,,,0.494,,127.006,7714.96,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-2-3-0-1,2018,MEMOUT,,,,0.506,,110.665,7650.31,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-2-3-0-2,2018,MEMOUT,,,,0.562,,113.371,7653.86,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-3-2-0-1,2018,MEMOUT,,,,0.549,,190.537,7601.13,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-3-2-0-3,2018,MEMOUT,,,,0.527,,118.368,7695.43,MemoryError under a 8192MB limit.
 PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-3-3-0-3,2018,KILLED,,,,,,,,
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-5-2-0-2,2018,MEMOUT,,,,0.532,,115.829,7614.34,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-5-3-0-1,2018,MEMOUT,,,,0.49,,763.082,7445.09,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p15-9-3,2018,MEMOUT,,,,0.189,,1242.207,5986.71,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p16-10-2,2018,TIMEOUT,,,,0.165,,1804.145,3308.85,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p16-10-3,2018,TIMEOUT,,,,0.152,,1804.898,3542.39,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p18-11-2,2018,TIMEOUT,,,,0.175,,1806.58,4622.79,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p20-12-1,2018,TIMEOUT,,,,0.18,,1807.988,5844.73,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p20-12-3,2018,TIMEOUT,,,,0.185,,1806.824,5804.5,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p22-13-2,2018,TIMEOUT,,,,0.192,,1813.797,5549.6,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p24-14-1,2018,TIMEOUT,,,,0.171,,1817.107,7031.19,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p24-14-2,2018,MEMOUT,,,,0.186,,1076.736,5997.4,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,Parking,p26-15-1,2018,MEMOUT,,,,0.174,,579.791,6746.47,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,10,2018,SOLVED,True,18,127.8,5.868,9.757,17.231,278.27,
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,13,2018,MEMOUT,,,,5.669,,115.261,6007.43,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,14,2018,MEMOUT,,,,6.484,,114.288,5521.16,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,19,2018,MEMOUT,,,,7.378,,102.964,5412.98,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,2,2018,MEMOUT,,,,1.5,,86.781,5759.48,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,23,2018,MEMOUT,,,,50.109,,982.367,6199.18,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,27,2018,MEMOUT,,,,52.856,,1094.434,7647.56,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,4,2018,SOLVED,True,20,129.0,4.656,8.664,14.976,281.1,
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,7,2018,MEMOUT,,,,5.259,,109.55,5952.24,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,9,2018,MEMOUT,,,,5.19,,117.976,5533.68,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,1,2018,SOLVED,True,4,12.5,0.214,2.717,4.1,191.59,
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,11,2018,MEMOUT,,,,1.735,,134.556,5847.38,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,13,2018,MEMOUT,,,,1.788,,266.309,5899.7,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,15,2018,MEMOUT,,,,1.78,,605.563,6353.54,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,17,2018,MEMOUT,,,,4.296,,299.156,6445.12,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,18,2018,MEMOUT,,,,4.45,,298.223,6441.95,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,3,2018,SOLVED,True,5,17.0,0.223,39.338,40.775,245.09,
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,6,2018,TIMEOUT,,,,0.518,,1801.409,1359.99,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,8,2018,TIMEOUT,,,,0.558,,1801.437,1110.4,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,9,2018,TIMEOUT,,,,0.577,,1801.264,1405.53,Hit the task time limit.
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-11,2018,MEMOUT,,,,0.858,,167.117,7597.15,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-13,2018,MEMOUT,,,,0.919,,185.715,5974.06,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-15,2018,MEMOUT,,,,0.87,,117.091,7716.93,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-5-2-0-2,2018,MEMOUT,,,,0.457,,112.968,7617.98,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Mapanalyser,pfile5-5-3-0-1,2018,MEMOUT,,,,0.469,,758.954,7442.57,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p15-9-3,2018,MEMOUT,,,,0.177,,1238.76,5983.3,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p16-10-2,2018,TIMEOUT,,,,0.151,,1804.545,3312.6,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p16-10-3,2018,TIMEOUT,,,,0.14,,1806.504,3543.7,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p18-11-2,2018,TIMEOUT,,,,0.162,,1807.997,4622.08,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p20-12-1,2018,TIMEOUT,,,,0.175,,1808.969,5848.14,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p20-12-3,2018,TIMEOUT,,,,0.172,,1810.464,4291.54,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p22-13-2,2018,TIMEOUT,,,,0.176,,1813.854,5547.88,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p24-14-1,2018,TIMEOUT,,,,0.168,,1818.028,7040.67,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p24-14-2,2018,MEMOUT,,,,0.166,,1161.701,6000.3,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,Parking,p26-15-1,2018,MEMOUT,,,,0.186,,615.632,6751.28,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,10,2018,SOLVED,True,18,127.8,5.659,10.22,17.611,279.68,
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,13,2018,MEMOUT,,,,6.529,,114.768,6008.71,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,14,2018,MEMOUT,,,,6.577,,117.145,5520.9,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,19,2018,MEMOUT,,,,7.721,,105.387,5412.12,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,2,2018,MEMOUT,,,,1.761,,93.252,5759.8,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,23,2018,MEMOUT,,,,42.26,,978.603,6193.91,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,27,2018,MEMOUT,,,,47.505,,1099.783,7645.16,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,4,2018,SOLVED,True,20,129.0,4.803,8.495,14.929,275.22,
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,7,2018,MEMOUT,,,,4.657,,114.255,5952.28,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,airport-temporal-strips,9,2018,MEMOUT,,,,5.447,,115.062,5535.72,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,1,2018,SOLVED,True,4,12.5,0.237,2.664,4.204,191.52,
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,11,2018,MEMOUT,,,,1.963,,140.877,5841.64,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,13,2018,MEMOUT,,,,1.819,,290.965,5895.74,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,15,2018,MEMOUT,,,,1.96,,655.402,6358.61,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,17,2018,MEMOUT,,,,4.87,,312.826,6456.71,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,18,2018,MEMOUT,,,,4.916,,316.717,6446.64,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,3,2018,SOLVED,True,5,17.0,0.233,40.563,42.074,245.46,
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,6,2018,TIMEOUT,,,,0.568,,1801.544,1358.54,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,8,2018,TIMEOUT,,,,0.566,,1801.81,1108.69,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,quantum_circuit,9,2018,TIMEOUT,,,,0.496,,1801.229,1406.83,Hit the task time limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-11,2018,MEMOUT,,,,0.966,,174.183,7598.55,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-13,2018,MEMOUT,,,,0.935,,192.644,5971.02,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-15,2018,MEMOUT,,,,0.825,,117.394,7718.22,MemoryError under a 8192MB limit.
 PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-16,2018,KILLED,,,,,,,,
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-19,2018,MEMOUT,,,,1.032,,147.69,7769.28,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-20,2018,MEMOUT,,,,1.191,,192.335,7277.43,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-3,2018,MEMOUT,,,,0.78,,121.378,7139.89,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-4,2018,MEMOUT,,,,0.82,,192.316,6216.12,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-7,2018,MEMOUT,,,,0.818,,198.77,7756.07,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-19,2018,MEMOUT,,,,0.963,,149.618,7768.15,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-20,2018,MEMOUT,,,,1.002,,202.775,7273.15,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-3,2018,MEMOUT,,,,0.835,,128.045,7140.17,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-4,2018,MEMOUT,,,,0.883,,208.804,6218.02,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-7,2018,MEMOUT,,,,0.825,,209.822,7756.3,MemoryError under a 8192MB limit.
 PLASPPlanner-seq,ipc2018-temporal,road-traffic-accident,instance-8,2018,KILLED,,,,,,,,
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-11,2018,MEMOUT,,,,0.387,,83.953,7775.24,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-12,2018,MEMOUT,,,,0.534,,82.931,7854.77,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-14,2018,MEMOUT,,,,0.548,,83.357,7859.06,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-15,2018,MEMOUT,,,,0.668,,87.342,7851.24,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-17,2018,MEMOUT,,,,0.397,,83.526,7863.8,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-11,2018,MEMOUT,,,,0.382,,83.666,7773.36,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-12,2018,MEMOUT,,,,0.565,,86.637,7858.95,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-14,2018,MEMOUT,,,,0.553,,85.411,7863.11,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-15,2018,MEMOUT,,,,0.645,,90.072,7853.28,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-17,2018,MEMOUT,,,,0.415,,86.244,7860.47,MemoryError under a 8192MB limit.
 PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-2,2018,KILLED,,,,,,,,
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-20,2018,MEMOUT,,,,0.459,,83.377,7862.82,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-5,2018,MEMOUT,,,,0.495,,85.308,7859.11,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-7,2018,MEMOUT,,,,0.437,,83.381,7859.89,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-9,2018,MEMOUT,,,,0.551,,83.385,7844.95,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,11,2018,MEMOUT,,,,13.212,,87.077,7402.62,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,13,2018,MEMOUT,,,,36.468,,121.616,7558.83,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,14,2018,MEMOUT,,,,36.33,,111.325,7623.34,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,16,2018,MEMOUT,,,,41.896,,117.328,7587.07,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,17,2018,MEMOUT,,,,46.612,,121.212,7661.49,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,2,2018,MEMOUT,,,,0.945,,76.151,7378.1,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,5,2018,MEMOUT,,,,1.698,,79.552,6943.53,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,6,2018,MEMOUT,,,,1.764,,74.383,7380.93,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,8,2018,MEMOUT,,,,8.517,,80.866,7428.49,MemoryError under a 8192MB limit.
-PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,9,2018,MEMOUT,,,,10.307,,85.613,7396.85,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-20,2018,MEMOUT,,,,0.46,,85.235,7862.75,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-5,2018,MEMOUT,,,,0.451,,85.669,7857.66,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-7,2018,MEMOUT,,,,0.438,,84.436,7856.57,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,sokoban,instance-9,2018,MEMOUT,,,,0.55,,84.278,7848.01,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,11,2018,MEMOUT,,,,11.721,,85.906,7332.94,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,13,2018,MEMOUT,,,,38.692,,124.666,7541.4,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,14,2018,MEMOUT,,,,40.885,,123.776,7613.56,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,16,2018,MEMOUT,,,,44.185,,120.385,7588.12,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,17,2018,MEMOUT,,,,53.898,,135.622,7576.23,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,2,2018,MEMOUT,,,,0.925,,79.266,7325.61,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,5,2018,MEMOUT,,,,1.784,,85.461,6947.36,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,6,2018,MEMOUT,,,,1.92,,76.888,7257.21,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,8,2018,MEMOUT,,,,9.677,,86.847,7353.05,MemoryError under a 8192MB limit.
+PLASPPlanner-seq,ipc2018-temporal,trucks-time-strips,9,2018,MEMOUT,,,,10.391,,89.275,7423.53,MemoryError under a 8192MB limit.

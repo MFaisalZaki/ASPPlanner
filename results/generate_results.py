@@ -5,10 +5,15 @@ The sandbox itself (per-task JSONs, tracebacks, slurm logs) is gitignored and
 weighs ~20 GB; this script distils it into the checked-in tables:
 
     results/results.csv                 every (planner, task) pair, one row
+    results/domains.csv                 every (planner, domain) pair, all tracks
     results/summary.json                the headline counts
     results/<track>/domains.csv         per-domain coverage and outcome counts
     results/<track>/instances.csv       per-instance outcome, runtime, plan
     results/<track>/README.md           the per-domain table, rendered
+
+The two top-level tables are the ones to hand to somebody else: ``results.csv``
+is the sweep per instance, ``domains.csv`` the same sweep per domain. The
+per-track directories are those two split by track, plus a rendered table.
 
 Usage:
 
@@ -278,6 +283,7 @@ def main() -> int:
     out = os.path.abspath(args.output_dir)
     os.makedirs(out, exist_ok=True)
     write_csv(os.path.join(out, 'results.csv'), RESULT_COLUMNS, rows)
+    write_csv(os.path.join(out, 'domains.csv'), DOMAIN_COLUMNS, domain_rows(rows))
 
     summary = summarize(rows, args.sandbox_dir)
     with open(os.path.join(out, 'summary.json'), 'w') as handle:

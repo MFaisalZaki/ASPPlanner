@@ -1,13 +1,13 @@
 # Temporal track
 
-**`PLASPPlanner-seq`** — 5/90 solved and validated (5.6%), 5/90 of encodable (5.6%), across 9 domains. Median runtime on solved tasks 15.0 s, median peak memory 245.1 MB.
+**`PLASPPlanner-seq`** — 5/90 solved and validated (5.6%), 5/90 of encodable (5.6%), across 9 domains. Median runtime on solved tasks 14.9 s, median peak memory 245.5 MB.
 
 | status | tasks |
 |---|---|
-| MEMOUT | 51 |
+| MEMOUT | 52 |
 | TIMEOUT | 29 |
 | SOLVED | 5 |
-| KILLED | 5 |
+| KILLED | 4 |
 
 *Encodable* = attempted, minus `UNSUPPORTED` (refused on `ProblemKind`) and minus
 `ERROR` (overwhelmingly the UP PDDL reader failing on the benchmark file itself).
@@ -18,7 +18,7 @@
 |---|---|---|---|
 | Cushing | 10 | 1 (10.0%) | TIMEOUT 9 |
 | Floortile | 10 | 0 (0.0%) | TIMEOUT 10 |
-| Mapanalyser | 10 | 0 (0.0%) | MEMOUT 8, KILLED 2 |
+| Mapanalyser | 10 | 0 (0.0%) | MEMOUT 9, KILLED 1 |
 | Parking | 10 | 0 (0.0%) | TIMEOUT 7, MEMOUT 3 |
 | airport-temporal-strips | 10 | 2 (20.0%) | MEMOUT 8 |
 | quantum_circuit | 10 | 2 (20.0%) | TIMEOUT 3, MEMOUT 5 |
