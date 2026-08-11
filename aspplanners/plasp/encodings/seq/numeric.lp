@@ -10,9 +10,20 @@
 % this layer adds no frame axiom of its own. numval/3 projects that atom to its
 % integer and numValue/3 evaluates linear expressions over it.
 %
-% numValue/3 is the interface other layers read: the disjunctive layer's numeric
-% literals and the temporal layer's over-all comparisons both go through it, each
-% guarded by its own `#defined numValue/3` so they stay inert without this layer.
+% numval/3 (and the numTerm/numConst side facts) is the interface other layers
+% read: the disjunctive layer's numeric literals and the temporal layer's
+% over-all comparisons state each comparison as a difference #sum over numval,
+% exactly as the precondition and goal comparisons below do, and are inert
+% without this layer because no numConst/numTerm facts exist to fire them.
+% numValue/3 -- the expression's value REIFIED into an atom -- survives only
+% where the value must become part of a derived term: the expression effects
+% (numEffectExpr/numAssignExpr), which bind it as the delta or the assigned
+% value. Everything else deliberately avoids the atom form: an assignment
+% aggregate grounds one candidate rule instance per reachable value, each
+% carrying its whole element list, and a comparison joining two such atoms
+% grounds one instance per VALUE PAIR -- both blow up as reachable ranges
+% widen with the horizon, which is the dominant grounding cost on numeric
+% tasks. A difference #sum grounds once per guard and step instead.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 % Every layer file opens by pinning the current program part, so that loading the
@@ -47,7 +58,13 @@ numval(V, X, 0) :- holds(V, value(V, X), 0), numVariable(V).
 % terms in their own facts is what lets a side hold any number of fluents
 % without the comparison's arity depending on how many -- `(+ (x ?b) (y ?b))`
 % and `(* 2 (x ?f))` are ordinary expressions here, not special cases.
-numValue(E, S + C, 0) :- numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V), numval(V, X, 0) }.
+%
+% numValue is derived ONLY for the expressions the effect rules read (see the
+% header): those must bind the value as a term. Comparisons never go through
+% it, so a task without expression effects grounds no numValue at all.
+numValueNeeded(E) :- numEffectExpr(_, _, E).
+numValueNeeded(E) :- numAssignExpr(_, _, E).
+numValue(E, S + C, 0) :- numValueNeeded(E), numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V), numval(V, X, 0) }.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Preconditions, effects, and the value of every expression at t
@@ -55,11 +72,28 @@ numValue(E, S + C, 0) :- numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V),
 
 #program step(t).
 
-% Numeric preconditions: linear comparisons of two numValue sides at t-1.
-:- occurs(A, t), numPrecondition(A, lt, E1, E2), numValue(E1, S1, t - 1), numValue(E2, S2, t - 1), S1 >= S2.
-:- occurs(A, t), numPrecondition(A, le, E1, E2), numValue(E1, S1, t - 1), numValue(E2, S2, t - 1), S1 > S2.
-:- occurs(A, t), numPrecondition(A, eq, E1, E2), numValue(E1, S1, t - 1), numValue(E2, S2, t - 1), S1 != S2.
-:- occurs(A, t), numPrecondition(A, neq, E1, E2), numValue(E1, S1, t - 1), numValue(E2, S2, t - 1), S1 = S2.
+% Numeric preconditions: linear comparisons of the two sides at t-1, stated as
+% ONE #sum over the difference of their term sums against the constants' gap:
+% `S1 >= S2` is `T1 + C1 >= T2 + C2` is `T1 - T2 >= C2 - C1`. One ground rule
+% per guard and step, elements linear in the sides' fluents -- where a join of
+% two reified values grounds one instance per candidate value PAIR. The side
+% tags (1/2) keep an element of E1 distinct from the same fluent's element of
+% E2, so a fluent shared by both sides is summed once per side, and comparing
+% an expression against itself sums to zero as it should. The positive
+% numConst atoms keep the original vacuousness: a comparison whose side was
+% never declared constrains nothing.
+:- occurs(A, t), numPrecondition(A, lt, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t - 1) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t - 1) } >= C2 - C1.
+:- occurs(A, t), numPrecondition(A, le, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t - 1) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t - 1) } > C2 - C1.
+:- occurs(A, t), numPrecondition(A, eq, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t - 1) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t - 1) } != C2 - C1.
+:- occurs(A, t), numPrecondition(A, neq, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t - 1) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t - 1) } = C2 - C1.
 
 % Numeric effects: constant-delta updates and constant assignments. They feed
 % core's caused/3, so core's inertia and modified/2 handle them like any effect.
@@ -74,7 +108,7 @@ caused(V, value(V, X + D), t) :- occurs(A, t), numEffectExpr(A, V, E), holds(V, 
 caused(V, value(V, D), t) :- occurs(A, t), numAssignExpr(A, V, E), numValue(E, D, t - 1).
 
 numval(V, X, t) :- holds(V, value(V, X), t), numVariable(V).
-numValue(E, S + C, t) :- numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V), numval(V, X, t) }.
+numValue(E, S + C, t) :- numValueNeeded(E), numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V), numval(V, X, t) }.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Numeric goals
@@ -82,9 +116,17 @@ numValue(E, S + C, t) :- numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V),
 
 #program check(t).
 
-% Linear comparisons at the goal step, evaluated against numValue(_, _, t)
-% exactly as numeric preconditions are at t-1.
-:- query(t), numGoal(lt, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 >= S2.
-:- query(t), numGoal(le, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 > S2.
-:- query(t), numGoal(eq, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 != S2.
-:- query(t), numGoal(neq, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 = S2.
+% Linear comparisons at the goal step, stated as difference #sums over
+% numval(_, _, t) exactly as numeric preconditions are at t-1.
+:- query(t), numGoal(lt, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } >= C2 - C1.
+:- query(t), numGoal(le, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } > C2 - C1.
+:- query(t), numGoal(eq, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } != C2 - C1.
+:- query(t), numGoal(neq, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } = C2 - C1.

@@ -4,8 +4,8 @@
 %   owns:     durativeAction/1 snap/3 durationValue/2 overall/3 numOverall/4
 %             minSeparation/1
 %   requires: core (holds/3, occurs/2, query/1)
-%             numeric (numValue/3, for the numOverall rules only -- guarded by
-%             `#defined numValue/3`, so they are inert without it)
+%             numeric (numval/numConst/numTerm, for the numOverall rules only --
+%             guarded by `#defined`, so they are inert without it)
 %
 % SMTPlan's happening encoding on top of core's horizon.
 %
@@ -71,8 +71,11 @@
 #defined numOverall/4.
 #defined minSeparation/1.
 
-% Supplied by the numeric layer; the numOverall rules below are inert without it.
-#defined numValue/3.
+% Supplied by the numeric layer; the numOverall rules below are inert without
+% it (no numConst/numTerm facts exist to fire them).
+#defined numval/3.
+#defined numConst/2.
+#defined numTerm/3.
 
 #show delta/2.
 
@@ -148,12 +151,21 @@ hasRemaining(DA, t) :- remaining(DA, _, t).
 
 :- running(DA, t), overall(DA, Variable, Value), not holds(Variable, Value, t).
 
-% The numeric analogue, read off numValue at t exactly as numPrecondition is at
-% t-1. Needs the numeric layer; inert without it.
-:- running(DA, t), numOverall(DA, lt, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 >= S2.
-:- running(DA, t), numOverall(DA, le, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 > S2.
-:- running(DA, t), numOverall(DA, eq, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 != S2.
-:- running(DA, t), numOverall(DA, neq, E1, E2), numValue(E1, S1, t), numValue(E2, S2, t), S1 = S2.
+% The numeric analogue, judged at t exactly as numPrecondition is at t-1: the
+% two sides' difference as one #sum over numval against the constants' gap
+% (see numeric.lp). Needs the numeric layer; inert without it.
+:- running(DA, t), numOverall(DA, lt, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } >= C2 - C1.
+:- running(DA, t), numOverall(DA, le, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } > C2 - C1.
+:- running(DA, t), numOverall(DA, eq, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } != C2 - C1.
+:- running(DA, t), numOverall(DA, neq, E1, E2), numConst(E1, C1), numConst(E2, C2),
+   #sum { X * K, V, 1 : numTerm(E1, K, V), numval(V, X, t) ;
+        -(X * K), V, 2 : numTerm(E2, K, V), numval(V, X, t) } = C2 - C1.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Goal: no durative action left open (SMTPlan puts !run(a, H-1) in its goal)
