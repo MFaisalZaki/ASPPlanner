@@ -1,26 +1,31 @@
 {
-    "name": "default",
+    "name": "aspplanners",
     "cfgs": {
         "timelimit": "00:30:00",
         "memorylimit": "8GB",
         "slurm-time-headroom": "00:05:00",
         "slurm-memory-headroom": "1GB",
+        "validate-plans": true,
         "slurm": {
             "cpus-per-task": 1,
-            "partition": null,
+            "partition": "sturm",
             "account": null,
-            "qos": null,
-            "max-parallel-jobs": 50,
+            "qos": "sturm",
+            "max-parallel-jobs": 100,
             "max-array-size": 1000,
             "extra-directives": []
         }
     },
     "tasks": {
-        "tracks": ["classical", "numeric", "temporal"],
+        "tracks": [
+            "classical",
+            "numeric"
+        ],
         "max-instances-per-domain": 0,
         "selection": "even",
         "include-domains": [],
         "exclude-domains": [],
-        "ipc-years": []
+        "ipc-years": [],
+        "selected-tasks": []
     }
 }

@@ -147,6 +147,50 @@ def _render_facts(asp_objects, wrap: Optional[str] = None) -> Set[str]:
     return lines
 
 
+class PipelineOrderError(RuntimeError):
+    """A compilation stage ran before one it depends on.
+
+    A programming error in :meth:`PLASPEncoder.compile`, never a statement about
+    the task -- which is why it is a ``RuntimeError`` and pointedly *not* a
+    ``NotImplementedError``: the engine adapters translate that into
+    ``UNSUPPORTED_PROBLEM``, and a reordered pipeline would then be reported as
+    a task outside the fragment instead of as the bug it is.
+    """
+
+
+class _StageOrder:
+    """The order `compile` has to run its stages in, checked as it runs.
+
+    Every constraint here is stated in a comment at the stage it governs, and
+    each says what a violation would produce: rescaling after the durative split
+    is "silently dropped on every temporal task", defaults after the initial
+    state "silently disables every numeric precondition", and so on. They share
+    a shape -- the wrong order yields a *wrong plan*, not an error -- which is
+    what makes them worth checking rather than documenting alone.
+
+    The check is on stage order only, not on the task: it costs a set lookup per
+    stage, so it stays out of the way on the large instances where grounding is
+    already the binding cost. It catches an edit that moves a stage, which is
+    the way this pipeline actually breaks (see the fold-drift guard below, added
+    in 8c73730 after exactly that).
+    """
+
+    def __init__(self):
+        self._done = []
+
+    def run(self, stage: str, after: Tuple[str, ...] = ()) -> None:
+        missing = [required for required in after if required not in self._done]
+        if missing:
+            raise PipelineOrderError(
+                f"The {stage!r} stage of the PLASP compilation pipeline ran before "
+                f"{missing!r}, which it depends on. Ran so far, in order: "
+                f"{self._done!r}. Reordering these stages does not fail loudly on "
+                f"its own -- it produces a plan for a task the encoder has quietly "
+                f"rewritten -- so the dependency is stated here as well as in the "
+                f"comment at each stage.")
+        self._done.append(stage)
+
+
 class PLASPEncoder:
     """
     This is a recreation of the PLASP tool: compiles a UP Problem into the
@@ -166,6 +210,10 @@ class PLASPEncoder:
         new_problem = problem.clone()
         new_problem.name = f"{self.name}_{problem.name}"
 
+        # The stages below have to run in this order; each constraint is stated
+        # at the stage it governs. See _StageOrder for why they are checked.
+        order = _StageOrder()
+
         # Each compilation stage contributes a map-back; composed in reverse
         # they lift a plan on the final problem to the user's original problem.
         map_backs = []
@@ -175,6 +223,7 @@ class PLASPEncoder:
         new_problem.clear_actions()
         for a in problem.actions:
             new_problem.add_action(self._remove_delete_then_set(a))
+        order.run('restate-actions')
 
         # step two put the task's numeric values on an integer grid, since clingo
         # terms are integers. A no-op -- and no rewrite at all -- unless the task
@@ -195,6 +244,7 @@ class PLASPEncoder:
         # makes that lookup divide exactly.
         static_folds = static_numeric_folds(new_problem)
         numeric_scale = scale_numeric_constants(new_problem, static_folds)
+        order.run('rescale', after=('restate-actions',))
 
         # Both of the above restate an action rather than replacing it, so one
         # map covers them. It is built here rather than as the actions are made
@@ -204,9 +254,11 @@ class PLASPEncoder:
         # line up pairwise.
         map_backs.append(partial(replace_action,
                                  map=dict(zip(new_problem.actions, problem.actions))))
+        order.run('action-map', after=('rescale',))
 
         new_problem, grounded_map_back = run_compilers(new_problem, compilationlist)
         map_backs.append(grounded_map_back)
+        order.run('compilers', after=('action-map',))
 
         # step three check if we can infer types for untyped problems. TIM works
         # on instantaneous actions over quantifier-free conditions: a temporal
@@ -232,8 +284,10 @@ class PLASPEncoder:
         # time grid the split computes has to come from the durations the task
         # states, not from the integer stand-ins these factors produce.
         duration_scales = duration_fluent_scales(new_problem)
+        order.run('duration-scales-computed', after=('compilers',))
         time_unit, durative_facts, snap_actions, asp_actions = \
             self._split_durative_actions(new_problem, duration_scales)
+        order.run('durative-split', after=('rescale', 'duration-scales-computed'))
 
         # Names are sanitized ('-' -> '_') at fact-rendering time by
         # asp_facts.asp_name and mapped back the same way during plan
@@ -269,12 +323,14 @@ class PLASPEncoder:
         # have no holds/3 chain, which silently disables every numeric
         # precondition that reads it.
         initialize_fluent_defaults(new_problem)
+        order.run('defaults', after=('durative-split',))
 
         # Last thing before the facts: a duration fluent's values go onto their
         # own integer grid, which the durationValue rules divide back out. It
         # waits until here so the defaults above are covered too, and so nothing
         # that reasons about real durations ever sees the scaled stand-ins.
         apply_duration_scales(new_problem, duration_scales)
+        order.run('duration-scales-applied', after=('defaults',))
 
         # False initial values are dropped, because a variable that is only ever
         # read as true needs no holds/3 chain for its false side and every such
@@ -303,6 +359,7 @@ class PLASPEncoder:
         if len(initial_state) == 0:
             initial_state = set(ASPInitialState(fluent, value) for fluent, value in new_problem.initial_values.items())
 
+        order.run('facts', after=('defaults', 'duration-scales-applied'))
         facts = {
             '_types':          _render_facts((ASPType(t) for t in new_problem.user_types), wrap='type'),
             '_default_values': _render_facts(ASPBooleanType(v) for v in [True, False]),

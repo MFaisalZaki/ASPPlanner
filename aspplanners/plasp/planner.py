@@ -8,6 +8,7 @@ from unified_planning.engines import CompilationKind, PlanGenerationResultStatus
 from unified_planning.plans import SequentialPlan, TimeTriggeredPlan, ActionInstance
 from unified_planning.shortcuts import EffectKind
 
+from aspplanners.common.errors import refusal_from_clingo_error
 from aspplanners.common.temporal import DEFAULT_TIME_SCALE, all_effects
 from aspplanners.plasp.encoder import PLASPEncoder
 from aspplanners.plasp.facts import asp_name, is_numeric_comparison
@@ -259,7 +260,7 @@ class PLASPPlanner:
         if horizon is not None:
             parts = [('base', []), ('check', [clingo.Number(horizon)])]
             parts += [('step', [clingo.Number(t)]) for t in range(1, horizon + 1)]
-            ctl.ground(parts)
+            self._ground(ctl, parts)
             ctl.assign_external(clingo.Function('query', [clingo.Number(horizon)]), True)
             outcome, symbols = self._solve(ctl, deadline)
             if outcome == 'unsat':
@@ -268,7 +269,7 @@ class PLASPPlanner:
                 return self._empty_plan()
             return self._conclude(outcome, symbols, horizon)
 
-        ctl.ground([('base', []), ('check', [clingo.Number(0)])])
+        self._ground(ctl, [('base', []), ('check', [clingo.Number(0)])])
         ctl.assign_external(clingo.Function('query', [clingo.Number(0)]), True)
         for t in range(0, max_horizon + 1):
             outcome, symbols = self._solve(ctl, deadline)
@@ -278,7 +279,7 @@ class PLASPPlanner:
                 break
             # Retire the horizon-t goal test and extend the program by one step.
             ctl.release_external(clingo.Function('query', [clingo.Number(t)]))
-            ctl.ground([('step', [clingo.Number(t + 1)]), ('check', [clingo.Number(t + 1)])])
+            self._ground(ctl, [('step', [clingo.Number(t + 1)]), ('check', [clingo.Number(t + 1)])])
             ctl.assign_external(clingo.Function('query', [clingo.Number(t + 1)]), True)
 
         self.status = PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
@@ -289,6 +290,25 @@ class PLASPPlanner:
     # ------------------------------------------------------------------
     # Solving
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ground(ctl, parts) -> None:
+        """`ctl.ground(parts)`, with a non-representable program reported as a
+        refusal rather than as a crash.
+
+        Grounding is where clingo finds out that the program the encoder built
+        cannot be held in its 32-bit terms -- a `#sum` over the reachable values
+        of an unbounded fluent, typically. The encoder cannot rule that out by
+        inspection (see `aspplanners.common.errors`), so it is classified here,
+        where it surfaces. Anything else clingo raises is left alone.
+        """
+        try:
+            ctl.ground(parts)
+        except RuntimeError as error:
+            refusal = refusal_from_clingo_error(error)
+            if refusal is None:
+                raise
+            raise refusal from error
 
     def _solve(self, ctl, deadline) -> Tuple[str, Optional[list]]:
         """Run one solve call against the current grounding.

@@ -78,6 +78,17 @@ class Layer:
     :data:`PREDICATE_REQUIRES`, because it holds only when the corresponding fact
     is actually present.
 
+    `describes_instance` is the subset of `owns` that states what the *task* is
+    rather than driving a rule: the problem instance's types, its objects, its
+    fluents, and the boolean value domain. The encoder emits them because the
+    program describes the instance -- they are what makes a dumped program a
+    standalone, readable clingo input -- and no rule reads them, which is
+    correct rather than dead. They are called out here so that
+    :func:`tests.test_layers` can hold every *other* owned predicate to the
+    rule that consumes it; without the distinction, "claimed but read by
+    nothing" would be indistinguishable from "claimed on the wrong layer",
+    which is silently wrong (see the module docstring).
+
     `kind_features` are the ``ProblemKind.has_*`` predicates that imply this
     layer. They are consulted defensively (a name absent from the installed
     unified-planning is skipped) so that a UP upgrade cannot break selection.
@@ -85,6 +96,7 @@ class Layer:
     name: str
     filename: str
     owns: FrozenSet[str] = frozenset()
+    describes_instance: FrozenSet[str] = frozenset()
     requires: Tuple[str, ...] = ()
     kind_features: Tuple[str, ...] = ()
     summary: str = ''
@@ -111,6 +123,15 @@ SEQ_LAYERS: Tuple[Layer, ...] = (
         owns=frozenset({
             'type', 'constant', 'has', 'variable', 'boolean', 'action',
             'precondition', 'postcondition', 'initialState', 'goal',
+        }),
+        # The instance's own vocabulary: its types, its objects (`constant`/`has`),
+        # its fluents, and the two boolean values. The encoder states them because
+        # the program describes the task; the rules work off `initialState`,
+        # `action`, `precondition`, `postcondition` and `goal` instead. Note that
+        # `variable` appears in core.lp only as the *term* `variable(V)` inside
+        # `holds`, never as an atom -- the fact is not read either.
+        describes_instance=frozenset({
+            'type', 'constant', 'has', 'variable', 'boolean',
         }),
     ),
     Layer(

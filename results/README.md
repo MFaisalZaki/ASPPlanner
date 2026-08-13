@@ -2,7 +2,7 @@
 
 The distilled tables of the sweep reported in [§3 of the top-level README](../README.md#3-benchmark-results):
 **6,648 (planner, task) pairs** over 6,648 tasks and 238 domains, run 2026-08-11 → 2026-08-13 through
-the [aspbench](../benchmarks/) harness at 1800 s / 8192 MB per task. This sweep ran
+the in-tree harness now replaced by [pyPMTEvalToolkit](https://github.com/pyPMT/pyPMTEvalToolkit), at 1800 s / 8192 MB per task. This sweep ran
 `PLASPPlanner-seq` alone, on classical and numeric; `ABAPlanner-ST` and the temporal track were not
 run, so neither appears here.
 

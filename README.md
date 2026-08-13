@@ -101,6 +101,26 @@ with OneshotPlanner(name="PLASPPlanner", params={"max_horizon": 50}) as planner:
 - **Plans in your vocabulary.** Returned plans reference the actions and objects of the problem you passed in — every internal compilation stage (grounding, type inference, renaming, numeric rescaling, durative split) is mapped back before the plan is handed over.
 - **Built-in validation.** Every returned plan is checked against the *original* problem before it is returned — with UP's `sequential_plan_validator`, or `up_time_triggered_validator` for temporal plans. Nothing that fails validation is reported as solved.
 
+### Refusals
+
+Both engines refuse tasks they cannot encode, and a refusal is part of the result rather than an exception that escapes it:
+
+```python
+result = planner.solve(problem)
+if result.status == PlanGenerationResultStatus.UNSUPPORTED_PROBLEM:
+    print(result.log_messages[0].message)   # ... cannot encode this task: <why>
+```
+
+`supported_kind()` answers for the task's *declared* features and is deliberately broad. Two things it cannot see also mean "outside this engine's fragment", and all three arrive the same way:
+
+| refused | when | example |
+|---|---|---|
+| the `ProblemKind` is outside `supported_kind()` | before encoding | a feature the backend does not implement |
+| the encoder reads the task and declines a shape | encoding time | a product of two fluents; a coefficient no rescaling makes whole |
+| clingo cannot represent the program the encoding built | grounding time | a `#sum` whose weights leave the signed 32-bit range |
+
+The third is why this is a status and not a pre-flight check: the encoding states a numeric comparison as a difference `#sum` over the *reachable values* of its fluents, so on a task whose fluents declare no bounds there is nothing in the task to check against — the limit is only visible once clingo grounds it. `aspplanners.common.errors.UnsupportedTaskError` is the type these raise internally; it subclasses `NotImplementedError`, so code written against the older convention of catching that still works.
+
 ### Inspecting the generated logic program
 
 ```python
@@ -287,7 +307,7 @@ Every number below comes from the checked-in tables in [results/](results/) — 
 
 ## 3.1 Setup
 
-One sweep, run 2026-08-11 → 2026-08-13 through the [aspbench](benchmarks/) harness on a slurm cluster (one CPU per task).
+One sweep, run 2026-08-11 → 2026-08-13 on a slurm cluster (one CPU per task), through the in-tree harness that [pyPMTEvalToolkit](https://github.com/pyPMT/pyPMTEvalToolkit) has since replaced — same stage model and same result schema, but a different track rule; see [Reproducing](#reproducing).
 
 | | |
 |---|---|
@@ -385,6 +405,8 @@ Seven domains account for 555 of the 641: `logistics00` (174), `elevators-00-ful
 | `RuntimeError: std::bad_alloc` | 2 | `thoughtful-sat14-strips`, `minecraft-pogo-advanced` — grounding a program too large to allocate |
 
 No coverage was lost to them: all seven `satellite` instances were `MEMOUT`/`KILLED` before and none is solved now. But the overflow is a genuine defect rather than a resource limit, and it is the one item in this sweep that the last change introduced.
+
+**The overflow has since been classified rather than left to crash.** It is not predictable at encode time — `satellite`'s fluents declare no bounds and its stated coefficients are all 1, so the weights that overflow come from values grounding discovers, not from anything in the task — so it is caught where it surfaces and reported as a refusal (`UNSUPPORTED_PROBLEM`, see [Refusals](#refusals)). The table above is the sweep as it ran; a re-run records those seven as `UNSUPPORTED` rather than `ERROR`, which moves them out of the `ERROR` column and out of the *encodable* denominator.
 
 ### Runtime on solved instances
 
@@ -490,7 +512,7 @@ This is the track that moved, and it moved in the right direction on both axes: 
 ## 3.5 Summary, and what to fix next
 
 1. **The numeric encoding got materially better, and the classical one did not move.** Comparing by difference under a single `#sum` is worth +48 solved, +8 domains, and a 3× cut in median solve time on the numeric track, with no change to the refusal set. That is the whole of this sweep's movement; classical's +4 is noise.
-2. **Fix the `satellite` integer overflow.** Seven tasks now die inside clingo's grounder because the difference-`#sum` builds weights past its limit. No coverage was lost — they were memouts before — but it is the one regression the last change introduced, and the failure is a crash rather than a refusal, which is the wrong way round for a limit the encoder can detect.
+2. ~~**Fix the `satellite` integer overflow.**~~ **Done.** Seven tasks died inside clingo's grounder because the difference-`#sum` builds weights past its limit. It turned out not to be detectable at encode time — the task states no bounds and no large constants, so the weights come from values grounding discovers — so it is classified where it surfaces and returned as a refusal instead of a crash (see [Refusals](#refusals)). What remains open is whether the numeric layer can state these comparisons in a way that does not reach the limit at all.
 3. **Plan length is still the binding constraint, and it is the strategy's, not the encoding's.** Median solved plan is 10 steps, 89% at 20 or under, maximum 53 — unchanged across four sweeps and unmoved by an encoding change that shifted numeric coverage by a quarter. Any large gain has to come from a better horizon strategy — a lower bound from a relaxed plan, or a planning-graph-style bound — not from a faster encoding.
 4. **Numeric grounding is the next resource ceiling.** 547 numeric tasks (39% of encodable) are `KILLED` or `MEMOUT` rather than out of time, concentrated in five domains: `block-grouping`, `15-puzzle`, `pancake`, `petrobras`, `tpp`. These fail before search begins, so they are an encoding-size problem and independent of the horizon strategy above.
 5. **What is refused is the honest boundary.** 287 products of two fluents, 70 fractional coefficients, 40 unrepresentable scale factors — unchanged this sweep, and unchangeable without leaving linear-integer ASP.
@@ -498,30 +520,29 @@ This is the track that moved, and it moved in the right direction on both axes: 
 
 ## Reproducing
 
-The harness lives in [benchmarks/](benchmarks/) and is documented in [benchmarks/README.md](benchmarks/README.md).
+Sweeps are run by [pyPMTEvalToolkit](https://github.com/pyPMT/pyPMTEvalToolkit), which benchmarks any planner reachable through the Unified Planning API. This repository carries only the experiment configuration, in [benchmarks/](benchmarks/) — limits, task selection, and one JSON file per planner — documented in [benchmarks/README.md](benchmarks/README.md).
 
 ```bash
-cd benchmarks
-./setup_benchmark.sh          # asks for the time/memory limit, then does everything
+git clone https://github.com/pyPMT/pyPMTEvalToolkit.git
+cd pyPMTEvalToolkit
+./setup_benchmark.sh --config /path/to/ASPPlanners/benchmarks --yes
 ```
 
-It creates a virtualenv, installs ASPPlanners and `aspbench` into it, clones the three benchmark repositories, writes an experiment with the limits you gave, and generates the slurm job arrays. Scripted:
+That creates a virtualenv, installs the toolkit and the engines the configuration names, clones the benchmark repositories, writes an experiment with the limits you gave, and generates the slurm job arrays. Both planner files carry `"up-planner-module": "aspplanners"`, which is how the toolkit reaches engines that register themselves on import; `pypmtevalcli engines --exp-dir experiment` checks they resolve before you submit ten thousand jobs.
 
-```bash
-./setup_benchmark.sh --time-limit 30m --memory-limit 8GB \
-                     --tracks "classical numeric temporal" --partition compute --yes
-```
-
-The five stages are separable, and only `solve` imports `unified_planning` — so a sweep can be generated on a laptop and run on the cluster:
+The stages are separable, and only `solve` and `engines` import `unified_planning` — so a sweep can be generated on a laptop and run on the cluster:
 
 ```
-aspbench init      → an experiment directory (limits + planner configurations)
-aspbench discover  → what tasks a benchmark repository holds
-aspbench generate  → one run command per (planner, task), plus slurm arrays
-aspbench solve     → run ONE pair under its limits, dump a JSON result   (slurm calls this)
-aspbench analyze   → results.csv + the coverage report reproduced above
-aspbench report    → paper-ready tables (text + LaTeX) and figures
+pypmtevalcli init      → an experiment directory (limits + planner configurations)
+pypmtevalcli engines   → which UP engines this environment can actually run
+pypmtevalcli discover  → what tasks a benchmark repository holds
+pypmtevalcli generate  → one run command per (planner, task), plus slurm arrays
+pypmtevalcli solve     → run ONE pair under its limits, dump a JSON result   (slurm calls this)
+pypmtevalcli analyze   → results.csv + the coverage report reproduced above
+pypmtevalcli report    → paper-ready tables (text + LaTeX) and figures
 ```
+
+The sweep reported above predates this change and was run by an in-tree harness with the same stage model and result schema. One behaviour differs and it moves the numbers: the toolkit files any domain declaring a `(:functions ...)` block under **numeric**, where the previous harness required a fluent to be *used as state*. That relabels 1,537 tasks across 69 cost-annotated IPC domains, so a new sweep reports **classical 3,330 / numeric 3,354** over 6,684 tasks rather than the 4,831 / 1,817 split in §3. Totals stay comparable; per-track coverage does not. See [benchmarks/README.md](benchmarks/README.md#one-thing-that-changed-with-the-toolkit).
 
 The checked-in tables under [results/](results/) are distilled from the finished sandbox with:
 
