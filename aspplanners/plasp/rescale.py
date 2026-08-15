@@ -496,13 +496,18 @@ def _refuse_self_reference(shape):
     integer encoding rather than a gap in the scaling: each application would
     need a tenth of the resolution of the last, without bound.
     """
-    coefficients = ', '.join(
-        str(value) + ('' if not names else ' * ' + ' * '.join(sorted(names)))
-        for value, names in shape.terms.get(shape.target, ()))
+    def term(value, names):
+        product = ' * '.join(sorted(names))
+        if not names:
+            return str(value)
+        return product if value == 1 else f"{value} * {product}"
+
+    coefficients = ' + '.join(term(value, names)
+                              for value, names in shape.terms.get(shape.target, ()))
     raise NotImplementedError(
-        f"The numeric effect on {shape.target!r} reads {shape.target!r} itself with "
-        f"the fractional coefficient {coefficients or 'it states'}, which no scaling "
-        f"of the task can make whole: scaling {shape.target!r}'s values scales the "
+        f"The numeric effect on {shape.target!r} reads {shape.target!r} itself with the "
+        f"fractional coefficient {coefficients or 'it states'}, which no scaling of the "
+        f"task can make whole: scaling {shape.target!r}'s values scales the "
         f"coefficient's own input by the same factor, so it cancels. The ASP encoding "
         f"cannot state it; state the task in units that make the coefficient integral.")
 

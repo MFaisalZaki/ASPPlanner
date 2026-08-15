@@ -17,13 +17,12 @@ static fluent's stored value, and whose ``r_i`` are exact rationals. A task that
 states an ordinary coefficient produces the one-monomial, no-variable case, so
 the arithmetic below is the rational arithmetic it replaces.
 
-Two rationals are folded into the ``r_i`` where they arise, which is what keeps
-the polynomial's *value* in the task's own units:
-
-  * the factor a looked-up fluent's stored values carry (see
-    :func:`~aspplanners.plasp.rescale.extra_fluent_scales`), so the monomial is
-    ``variable / scale`` rather than the stored number;
-  * whatever rational the expression multiplied the fluent by.
+A variable stands for the number the grounder finds in the initial state, which
+is the fluent's value multiplied by whatever factor it is stored with (see
+:mod:`aspplanners.plasp.rescale`). Nothing here divides that factor back out,
+because the ``r_i`` it multiplies already carries it: a linear form reads a
+fluent as ``V/S_f``, so the coefficient a fold is attached to is per *stored*
+unit, and the two meet exactly.
 
 What a :class:`Coeff` can be rendered as depends on where it sits. A *comparison*
 is multiplied through by the least common denominator of both its sides, so its
@@ -31,7 +30,7 @@ coefficients always render as whole numbers times the lookups. An *effect* has
 no such move -- multiplying it through would change the fluent's value -- so a
 leftover denominator has to divide the lookups exactly, which
 :meth:`Coeff.render` states as a division and
-:func:`~aspplanners.plasp.rescale.extra_fluent_scales` is what arranges.
+:func:`~aspplanners.plasp.rescale.numeric_value_scales` is what arranges.
 """
 
 from fractions import Fraction
@@ -79,14 +78,9 @@ class Coeff:
         return cls({(): Fraction(value)})
 
     @classmethod
-    def lookup(cls, variable: str, scale=1) -> 'Coeff':
-        """The value the grounder binds `variable` to, in the task's own units.
-
-        `scale` is the factor that stored value carries, and is divided straight
-        back out here so that everything downstream can treat the monomial as
-        the fluent's actual value.
-        """
-        return cls({(variable,): Fraction(1, 1) / Fraction(scale)})
+    def lookup(cls, variable: str) -> 'Coeff':
+        """The value the grounder binds `variable` to, as a one-monomial Coeff."""
+        return cls({(variable,): Fraction(1)})
 
     ZERO: 'Coeff'
     ONE: 'Coeff'
@@ -228,20 +222,14 @@ class NumericContext:
     them, and one owner (an action, a goal, a durative action) is exactly the
     scope over which a lookup variable's name has to be unique.
 
-    Three per-fluent numbers live here, and the difference between the first two
-    is the whole reason this class exists rather than a plain dictionary:
+    Two per-fluent numbers live here:
 
-      * ``value_scales`` -- the *extra* factor a fluent's values carry beyond
-        the task-wide rescale. 1 for almost every fluent, and more only where an
-        effect on it would otherwise have a fractional coefficient (see
-        :func:`~aspplanners.plasp.rescale.extra_fluent_scales`). A linear form
-        is stated in the units the task-wide rescale left it in, so a
-        coefficient read off such a fluent is divided by this and an effect's
-        delta multiplied by its target's.
-      * ``stored_scales`` -- the *whole* factor, task-wide rescale included. A
-        folded lookup binds the number sitting in the initial state, and a
-        product of two of those would carry the task-wide factor twice over, so
-        a fold divides by this one and comes back in the task's own units.
+      * ``value_scales`` -- the factor a fluent's values are stored multiplied
+        by, 1 for every fluent of a task whose numbers are already whole (see
+        :func:`~aspplanners.plasp.rescale.numeric_value_scales`). A coefficient
+        read off such a fluent is divided by it, so a linear form is in the
+        task's own units whatever the storage; an effect's value is multiplied
+        by its *target's*, which is the units that fluent is stored in.
       * ``value_gcds`` -- what every one of a fluent's stored values is a
         multiple of. That is the promise :meth:`Coeff.render` needs to state a
         leftover denominator as a division; without it an effect reading a
@@ -257,10 +245,8 @@ class NumericContext:
     #: Prefix of the ASP variable a folded static lookup binds its value to.
     PREFIX = 'RAWSTAT'
 
-    def __init__(self, value_scales=None, stored_scales=None, static_fluents=(),
-                 value_gcds=None):
+    def __init__(self, value_scales=None, static_fluents=(), value_gcds=None):
         self.value_scales = dict(value_scales or {})
-        self.stored_scales = dict(stored_scales or {})
         self.static_fluents = frozenset(static_fluents)
         self.value_gcds = dict(value_gcds or {})
         self._lookups: Dict[str, Tuple[str, Tuple[str, ...]]] = {}
@@ -271,13 +257,8 @@ class NumericContext:
     # -- scales ------------------------------------------------------------
 
     def scale(self, fluent_name: str) -> Fraction:
-        """The extra factor this fluent's stored values carry."""
+        """The factor between this fluent's stored and stated values."""
         return Fraction(self.value_scales.get(fluent_name, 1))
-
-    def stored_scale(self, fluent_name: str) -> Fraction:
-        """The whole factor between this fluent's stored and original values."""
-        return Fraction(self.stored_scales.get(fluent_name,
-                                               self.value_scales.get(fluent_name, 1)))
 
     def is_static(self, fluent_name: str) -> bool:
         return fluent_name in self.static_fluents
@@ -286,6 +267,11 @@ class NumericContext:
 
     def fold(self, key: str, term: str, fluent_name: str, bindings=()) -> Coeff:
         """A static fluent occurrence as a :class:`Coeff` over its lookup.
+
+        The variable binds the *stored* value, which is the fluent's own times
+        its factor -- and that is what the caller wants, because the coefficient
+        it multiplies came out of a linear form that had already divided by the
+        same factor.
 
         `key` identifies the occurrence -- two occurrences of the same fluent
         expression share one variable, so a rule that reads it twice carries one
@@ -303,7 +289,7 @@ class NumericContext:
             divisor = int(self.value_gcds.get(fluent_name, 1) or 1)
             if divisor > 1:
                 self.exact_divisors[variable] = divisor
-        return Coeff.lookup(variable, self.stored_scale(fluent_name))
+        return Coeff.lookup(variable)
 
     def fluent_of(self, variable: str) -> str:
         """The fluent whose value `variable` was handed out for."""

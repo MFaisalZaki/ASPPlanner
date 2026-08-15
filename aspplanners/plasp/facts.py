@@ -388,8 +388,8 @@ def _constant_value(f):
 # until ASPNumComparison multiplies the whole comparison out to integers.
 #
 # A form is stated in the task's *own* units, not in the units its values are
-# stored in: a fluent whose values carry an extra factor (see
-# `rescale.extra_fluent_scales`) has that factor divided out of its coefficient
+# stored in: a fluent whose values carry a factor (see
+# `rescale.numeric_value_scales`) has that factor divided out of its coefficient
 # here, and multiplied back in by whoever states a *value* -- an effect's delta
 # or assignment. A comparison needs no such move, since multiplying both its
 # sides through by the common denominator clears the factor exactly.
@@ -422,12 +422,12 @@ def _fold_statics(form, context):
     grounds. Returns None when the form reads a fluent some action writes, which
     is the genuinely non-linear case.
 
-    The folded value is the fluent's value in the task's *own* units, so a
-    product of two of them carries the task-wide rescale once rather than twice
-    (see :meth:`NumericContext.stored_scale`). Whether the division that takes
-    it back there can be stated exactly is not decided here: a comparison
-    multiplies it through and never has to, and an effect that does is refused
-    by :meth:`Coeff.render` with the effect named.
+    The lookup binds the fluent's *stored* value and the coefficient it replaces
+    had already been divided by that fluent's factor, so the two meet in the
+    task's own units and the fold introduces no factor of its own. Whether the
+    denominator that leaves can be stated exactly is not decided here: a
+    comparison multiplies it through and never has to, and an effect that does
+    is refused by :meth:`Coeff.render` with the effect named.
     """
     constant = form[1]
     for expr, coefficient in form[0].values():
@@ -436,9 +436,7 @@ def _fold_statics(form, context):
         fluent = expr.up_expr.fluent()
         if not context.is_static(fluent.name):
             return None
-        # The coefficient is in units the extra factor was divided out of; the
-        # fold puts the value back in the task's own, so that factor goes with it.
-        constant = constant + coefficient.scaled(context.scale(fluent.name)) * context.fold(
+        constant = constant + coefficient * context.fold(
             str(expr), str(expr), fluent.name, expr.bindings)
     return {}, constant
 
@@ -867,7 +865,7 @@ def _fold_fractional_statics(form, context):
             terms[key] = (expr, coefficient)
             continue
         name = expr.up_expr.fluent().name
-        constant = constant + coefficient.scaled(context.scale(name)) * context.fold(
+        constant = constant + coefficient * context.fold(
             str(expr), str(expr), name, expr.bindings)
     return terms, constant
 

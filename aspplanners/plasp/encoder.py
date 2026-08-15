@@ -309,7 +309,6 @@ class PLASPEncoder:
         # it lifts out of each durative action.
         numeric_context = NumericContext(
             value_scales=value_scales,
-            stored_scales=value_scales,
             static_fluents=static_fluent_names,
             value_gcds=stored_value_gcds(new_problem, value_scales))
 

@@ -116,7 +116,7 @@ if result.status == PlanGenerationResultStatus.UNSUPPORTED_PROBLEM:
 | refused | when | example |
 |---|---|---|
 | the `ProblemKind` is outside `supported_kind()` | before encoding | a feature the backend does not implement |
-| the encoder reads the task and declines a shape | encoding time | a product of two fluents; a coefficient no rescaling makes whole |
+| the encoder reads the task and declines a shape | encoding time | a product of two fluents the task writes; an effect reading its own target with a fractional coefficient |
 | clingo cannot represent the program the encoding built | grounding time | a `#sum` whose weights leave the signed 32-bit range |
 
 The third is why this is a status and not a pre-flight check: the encoding states a numeric comparison as a difference `#sum` over the *reachable values* of its fluents, so on a task whose fluents declare no bounds there is nothing in the task to check against — the limit is only visible once clingo grounds it. `aspplanners.common.errors.UnsupportedTaskError` is the type these raise internally; it subclasses `NotImplementedError`, so code written against the older convention of catching that still works.
@@ -186,10 +186,11 @@ The authoritative list is `supported_kind()` in [aspplanners/up_engines.py](aspp
 
 A task outside the declared kind is refused up front with `UNSUPPORTED_PROBLEM` rather than silently mis-encoded. `ProblemKind` cannot express every distinction, so a few shapes are raised at *encoding* time instead, as `NotImplementedError`:
 
-- a product or quotient of two numeric fluents (not linear),
-- a fractional coefficient in a numeric effect,
-- a bounded numeric type on a task that needs rescaling,
-- a **conditional** numeric effect other than the assignment of a constant — an `increase` or a value read off the state is applied by `numEffect`/`numAssignExpr`, which hang off `occurs/2` with no room for the effect's condition,
+- a product of two numeric fluents the task **writes** (not linear in the state; a product with a *static* factor is linear and is encoded, see [Numeric planning](#numeric-planning)),
+- division by a numeric fluent,
+- an effect that reads **its own target** with a fractional coefficient (`(assign (v ?b) (+ … (* 0.9 (v ?b))))`) — no scaling reaches it, since the target's own factor cancels,
+- a numeric value needing a scale factor past `MAX_NUMERIC_SCALE`,
+- a bounded numeric type on a fluent that needs scaling,
 - a numeric over-all condition in a durative action (**ABA backend only**).
 
 `GENERAL_NUMERIC_PLANNING` is declared because an effect that merely *reads* a fluent already pushes a task's kind there, and the feature has no linear/non-linear split.
@@ -206,6 +207,7 @@ Before a problem reaches the ASP encoder it is put through a list of UP compiler
 | `or`, `exists` | disjunctions, which conjunctive facts cannot state, so they get their own `orGroup`/`orDisjunct` vocabulary: at least one disjunct has to hold, and a disjunct holds when all of its literals do. An `exists` is the same shape with its disjuncts indexed by the quantified variable's binding |
 | an action that sets **and** clears one fluent | PDDL's own rule, arbitrated at the step rather than by deleting one of the effects: the add wins. Only an add that *always* fires shadows a delete up front; a conditional or quantified one leaves both in, and `core.lp` settles the bindings where they actually collide. This is what the ADL `forall`/`when` pairs need — miconic's `stop` clears `boarded` for the arrivals and sets it for the boarders, and dropping the clear strands every passenger aboard |
 | numeric comparisons | `<`, `<=`, `=` and their negations against `numval`, wherever a condition can appear: `numPrecondition`, `numGoal`, `numOverall`, and `orDisjunctNum` inside a disjunct. A negation is the comparison's complement (`not (x = y)` is `neq`), not a `not` over a `holds` chain the numeric side does not have |
+| a **conditional numeric effect** | the numeric layer's own `numCondEffect`/`numCondEffectExpr`/`numCondAssignExpr`, gated by the effect term exactly as `caused/3` gates a boolean one. A delta cannot ride on `caused/3` — that states the variable's new value, and PDDL says two deltas that both fire *add* — so the firing deltas are summed and applied once. A **numeric condition** on such an effect is the one-disjunct `orGroup` of its term, which the disjunctive layer judges with the difference `#sum` it already has |
 
 Staying lifted is the point. An action with *k* disjunctions of 4 literals each — the UP disjunction remover writes out 4<sup>k</sup> copies of it, the encoding writes one group:
 
@@ -221,11 +223,36 @@ The one shape the encoding does not take is a disjunction nested inside a disjun
 
 ## Numeric planning
 
-Integer- and real-valued fluents with `increase` / `decrease` / `assign` effects whose value is a **linear** expression over the state — a constant, or `k₁·V₁ + … + C` evaluated against the previous step — and linear comparison preconditions and goals.
+Integer- and real-valued fluents with `increase` / `decrease` / `assign` effects whose value is a **linear** expression over the state — a constant, or `k₁·V₁ + … + C` evaluated against the previous step — and linear comparison preconditions and goals. Any of those effects may be **conditional**, and any condition may be numeric.
 
-Reals are accepted because PDDL `(:functions ...)` parse as real-typed. Clingo terms are integers, so a task stating fractional values is rescaled to whole ones before it is encoded ([aspplanners/plasp/rescale.py](aspplanners/plasp/rescale.py)). The plan is unaffected — it is a sequence of actions. A fluent with no entry in the initial state gets a default laid down first (bool → false, numeric → 0, PDDL's own closed-world reading).
+Reals are accepted because PDDL `(:functions ...)` parse as real-typed. A fluent with no entry in the initial state gets a default laid down first (bool → false, numeric → 0, PDDL's own closed-world reading).
 
-Not supported: a product or quotient of two fluents, a fractional coefficient in an effect, and a bounded numeric type on a task that needs rescaling (its bound would not move with the values it bounds). All three raise rather than silently approximate.
+### Linear *in the state*, not linear as an expression
+
+`(* (distance ?c1 ?c2) (slow-burn ?a))` — zenotravel's fuel cost — is a product of two fluents, which no integer encoding states. But neither of them is *state*: no action of the task writes either, so their values are whatever the initial state says, and the grounder can read them out of it once per parameter binding. The product is a number by the time the rule grounds, and what is left is an ordinary coefficient.
+
+So the boundary is not "a product of two fluents" but **a product of two fluents the task writes**. A factor no action writes is folded into an `initialState` lookup in the rule's body ([numeric_terms.py](aspplanners/plasp/numeric_terms.py)), which makes `(* (workload ?r) (efficiency ?r))`, `(* (D) (i ?r))` and `(* (- (request ?g) (bought ?g)) (price ?g ?m))` linear as well. Division by a fluent stays out: clingo's `/` truncates, so the quotient would be rounded rather than exact.
+
+### Integer values, per fluent
+
+Clingo terms are integers, so a task stating fractional values is stored multiplied by a factor and divided back out wherever the encoding reads it ([rescale.py](aspplanners/plasp/rescale.py)). The factor is **per fluent**, because the two things that force one are:
+
+| forces a factor | example | what it needs |
+|---|---|---|
+| fractional values | `(= (x b) 3.5)` | a factor clearing their denominators |
+| a fractional coefficient in an effect | `(increase (x ?b) (* 1.5 (v ?b)))` | a factor clearing *that* |
+
+The second is why one task-wide factor is not enough: scaling every value alike moves `v` too, and the 3/2 survives — where storing `x` twice as fine makes the delta `3 · v`, a whole coefficient. The two are one constraint system, since a fluent's factor appears in the coefficient of every effect that reads it as well as in every effect on it, and it is solved by raising factors until nothing is fractional. Values are stored multiplied, coefficients divided, effects multiplied back by their target's factor — and comparisons need neither, because both sides are multiplied through by their common denominator, which is exact and preserves the comparison. A *comparison's* constants therefore put no constraint on any factor at all. The plan is unaffected either way: it is a sequence of actions and carries no units.
+
+**Not supported**, and each raises rather than silently approximating: a product of two written fluents, division by a fluent, an effect reading **its own target** with a fractional coefficient (`v := 0.9·v + …` asks for a tenth of the previous resolution at every step, so no factor is enough), a factor past `MAX_NUMERIC_SCALE = 10⁶`, and a bounded numeric type on a fluent that needs one (`integer[0, 10]` is part of a type UP keys the fluent by, so the bound cannot move with the values it bounds).
+
+### Conditional numeric effects
+
+`(when C (increase (fuel ?s) …))` cannot ride on `caused/3` the way a conditional *boolean* effect does: `caused` states a variable's new value outright, and PDDL's reading of two deltas that both fire is that they **add**, so two `caused` atoms would be two states rather than one sum. The numeric layer collects the deltas whose effect term fires and applies their sum once. A conditional assignment of a constant still takes the `postcondition` path, since that shape *is* a new value.
+
+A **numeric condition** on a conditional effect is stated as a one-disjunct `orGroup` of the effect term — `caused/3` already requires every group of a term to hold, and the disjunctive layer already judges a numeric literal with a difference `#sum`, so the shape needs no rule of its own. That is why a task with one loads the disjunctive layer.
+
+Both used to be compiled away with `up_conditional_effects_remover`, at the cost of 2^k action variants. Nothing needs it now, so the default compilation pipeline is empty for every task.
 
 ## Temporal planning
 
@@ -283,7 +310,7 @@ The encoding is one `.lp` file per feature, under [aspplanners/plasp/encodings/s
 | Layer | File | Covers |
 |---|---|---|
 | `core` | [core.lp](aspplanners/plasp/encodings/seq/core.lp) | multi-valued STRIPS over the horizon: the action choice, preconditions, (conditional) effects, add-wins arbitration, inertia, the goal test |
-| `numeric` | [numeric.lp](aspplanners/plasp/encodings/seq/numeric.lp) | linear numeric fluents, comparisons, effects and goals |
+| `numeric` | [numeric.lp](aspplanners/plasp/encodings/seq/numeric.lp) | linear numeric fluents, comparisons, effects (conditional ones included) and goals |
 | `disjunctive` | [disjunctive.lp](aspplanners/plasp/encodings/seq/disjunctive.lp) | disjunctive, existential and nested conditions and goals |
 | `temporal` | [temporal.lp](aspplanners/plasp/encodings/seq/temporal.lp) | PDDL 2.1 durative actions as SMTPlan-style happenings, annotated with the SMTPlan constraint each rule mirrors |
 
@@ -381,7 +408,29 @@ All 1,047 `SOLVED` results passed plan validation — no unvalidated plan was co
 | `Making this task's numeric values integral needs a scale factor of 5e13` | 40 | 1 — `worksworld` |
 | `… reads … with the fractional coefficient 3/2` | 20 | 1 — `fo-sailing` |
 
-Unchanged from the previous sweep, and that is the point: this is not a moving frontier but a real boundary of a linear-integer ASP encoding — products of two fluents, and coefficients that no rescaling makes whole. The 100 tasks unblocked last sweep (`petrobras`, `hydropower`) stayed encodable, and `petrobras` has now returned its first solution.
+#### Since the sweep
+
+**162 of those 397 are no longer refused.** The table above was read as a boundary of linear-integer ASP; two thirds of it turned out to be a boundary of how the encoder read the task. Every instance of these seven domains now encodes:
+
+| domain | tasks | why it is encodable |
+|---|---|---|
+| `zenotravel` | 23 | `(* (distance ?c1 ?c2) (slow-burn ?a))` — both factors static, so the product is a number the grounder works out |
+| `factory-robot` | 20 | `(* (workload ?r) (efficiency ?r))` — `efficiency` static, so it is a coefficient |
+| `line-exchange-snp` | 20 | `(* (D) (i ?r))` — both static |
+| `gear-car` | 20 | `(* (beta) (gear_fuel_aligned ?g))` — both static |
+| `tpp-metric` | 9 | `(* (- (request ?g) (bought ?g)) (price ?g ?m))` — `price` and `request` static |
+| `fo-farmland` | 50 | `(increase (cost) (* 0.4 (num-of-cars)))` — storing `cost` five times finer makes the coefficient 2 |
+| `fo-sailing` | 20 | `(increase (x ?b) (* 1.5 (v ?b)))` — storing `x` and `y` twice as fine makes it 3 |
+
+What remains refused, and now says so precisely:
+
+| still refused | tasks | why it is a real boundary |
+|---|---|---|
+| the `nlnp-*` family | 145 | a product of two fluents the task *writes* (`(* (wear ?x) (load ?x))`, `(* (v ?b) (v ?b))`) — not linear in the state under any reading |
+| `sailing-wind-opt` / `sailing-wind-sat` | 40 | `(assign (v ?b) (+ … (* (r ?b) (v ?b))))` with `r = 0.9`: an effect reading its own target with a fractional coefficient asks for a tenth of the previous resolution at every step, and the target's own factor cancels |
+| `worksworld` | 40 | values four orders of magnitude apart in one comparison; the factor that makes them whole is 5·10¹³, past the cap and past what a 32-bit clingo term holds |
+
+These counts are instance counts on the domains as the sweep saw them, not a re-run: coverage on the newly encodable tasks is a question for the next sweep. What is checked in is that they reach clingo and that the plans they return validate — `zenotravel`'s first three instances solve in 6–9 steps and pass UP's validator against the original, unscaled task.
 
 **`ERROR` is the front end, not the planner.** 641 of the 650 are UP PDDL reader failures on the benchmark files themselves — 98.6%:
 
@@ -515,7 +564,7 @@ This is the track that moved, and it moved in the right direction on both axes: 
 2. ~~**Fix the `satellite` integer overflow.**~~ **Done.** Seven tasks died inside clingo's grounder because the difference-`#sum` builds weights past its limit. It turned out not to be detectable at encode time — the task states no bounds and no large constants, so the weights come from values grounding discovers — so it is classified where it surfaces and returned as a refusal instead of a crash (see [Refusals](#refusals)). What remains open is whether the numeric layer can state these comparisons in a way that does not reach the limit at all.
 3. **Plan length is still the binding constraint, and it is the strategy's, not the encoding's.** Median solved plan is 10 steps, 89% at 20 or under, maximum 53 — unchanged across four sweeps and unmoved by an encoding change that shifted numeric coverage by a quarter. Any large gain has to come from a better horizon strategy — a lower bound from a relaxed plan, or a planning-graph-style bound — not from a faster encoding.
 4. **Numeric grounding is the next resource ceiling.** 547 numeric tasks (39% of encodable) are `KILLED` or `MEMOUT` rather than out of time, concentrated in five domains: `block-grouping`, `15-puzzle`, `pancake`, `petrobras`, `tpp`. These fail before search begins, so they are an encoding-size problem and independent of the horizon strategy above.
-5. **What is refused is the honest boundary.** 287 products of two fluents, 70 fractional coefficients, 40 unrepresentable scale factors — unchanged this sweep, and unchangeable without leaving linear-integer ASP.
+5. ~~**What is refused is the honest boundary.** 287 products of two fluents, 70 fractional coefficients, 40 unrepresentable scale factors — unchanged this sweep, and unchangeable without leaving linear-integer ASP.~~ **Most of it was not the boundary.** 162 of those 397 have since become encodable without leaving linear-integer ASP, because two of the three families were misread (see [Since the sweep](#since-the-sweep)). What is left is: a product of two fluents the task *writes*, and an effect reading its own target with a fractional coefficient.
 6. **The benchmark input is dirtier than the planner.** 641 tasks — 10% of the sweep, and 98.6% of all `ERROR`s — never reached the encoder because the UP PDDL reader could not parse the IPC files. Five of those are one unparseable domain file each, withholding 226 instances between them: the cheapest coverage in this table is not in the planner at all.
 
 ## Reproducing
