@@ -272,6 +272,28 @@ def test_a_forall_conditional_numeric_effect_fires_per_binding():
     assert_plan_is_over_original_problem(task, plan)
 
 
+def test_two_equal_deltas_on_one_fluent_are_two_elements_of_the_sum():
+    """`forall ?o . w(?o) += 2` alongside `w(d) += 2` is +4 on `d`, and the two
+    are only distinguishable in the sum by the effect term they carry: keyed by
+    the delta alone they would be one element and count once."""
+    task = parse_case("briefcase", "problem-tax.pddl")
+    tax = task.action("tax")
+    weight, d = task.fluent("weight"), task.object("d")
+    tax.add_increase_effect(weight(d), 2)
+    # A conditional delta anywhere in the action is what routes all of its
+    # deltas through the sum; without one they stay on numEffect.
+    tax.add_increase_effect(weight(d), 0, condition=task.fluent("in")(d))
+    task.clear_goals()
+    task.add_goal(GE(weight(d), 4))
+
+    planner = PLASPPlanner(task)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tax"], (
+        "one tax should be worth 4 on d")
+    assert_plan_is_over_original_problem(task, plan)
+
+
 def test_a_conditional_constant_assignment_is_still_encoded():
     """The numeric shape the postcondition path *can* state: a constant
     assignment travels on the same holds/3 chain a boolean value does."""

@@ -1087,7 +1087,15 @@ class ASPAction(ASPTerm):
             not e.fluent.type.is_bool_type() and e.kind in (EffectKind.INCREASE,
                                                             EffectKind.DECREASE)
             for e in a.conditional_effects)
-        unconditional_term = 'effect(unconditional)'
+        # Each of them gets a term of its own rather than one shared "no
+        # condition" term, because the sum is keyed by (delta, term): two deltas
+        # that happen to be equal -- `forall ?o . w(?o) += 2` alongside
+        # `w(d) += 2` -- would otherwise be one element and count once.
+        unconditional_terms = {}
+
+        def unconditional_term(term):
+            return unconditional_terms.setdefault(
+                term, f'effect((uncond,"{asp_name(a.name)}",{len(unconditional_terms)}))')
         for eff in a.unconditional_effects:
             target = parseexpr(eff.fluent)
             quantified = _effect_bindings(eff, target)
@@ -1132,8 +1140,8 @@ class ASPAction(ASPTerm):
             if _reads_fluents(form):
                 expr = _effect_expr(form, term, scale, self.context)
                 body = _dedup([f'action({self._head})'] + quantified + expr.bindings)
-                head = (f"numCondEffectExpr({self._head}, {unconditional_term}, {term}, "
-                        f"{str(expr)})" if conditional_deltas
+                head = (f"numCondEffectExpr({self._head}, {unconditional_term(term)}, "
+                        f"{term}, {str(expr)})" if conditional_deltas
                         else f"numEffectExpr({self._head}, {term}, {str(expr)})")
                 self._postconditions.append(f"{head} :- {', '.join(body)}.")
                 self._postconditions += expr.declaration_rules(body)
@@ -1145,8 +1153,8 @@ class ASPAction(ASPTerm):
             value = _effect_constant(form, term, scale, self.context)
             body = _dedup([f'action({self._head})'] + quantified
                           + list(self.context.body(form[1])))
-            head = (f"numCondEffect({self._head}, {unconditional_term}, {term}, {value})"
-                    if conditional_deltas
+            head = (f"numCondEffect({self._head}, {unconditional_term(term)}, {term}, "
+                    f"{value})" if conditional_deltas
                     else f"numEffect({self._head}, {term}, {value})")
             self._postconditions.append(f"{head} :- {', '.join(body)}.")
 
