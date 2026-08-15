@@ -15,6 +15,7 @@ import aspplanners  # noqa: F401 -- registers the engine
 from unified_planning.engines import PlanGenerationResultStatus as Status
 from unified_planning.shortcuts import (
     BoolType,
+    Div,
     Fluent,
     GE,
     InstantaneousAction,
@@ -212,14 +213,49 @@ def test_a_bounded_numeric_type_with_a_fractional_value_is_rejected():
 
 
 def test_the_scale_factor_is_capped():
-    """Two coprime denominators this size are a task stated in the wrong units:
-    their least common multiple is ~10^12, and scaling by it would make the
-    integers meaningless before it made them wrong."""
+    """Two effects that each ask for a finer grid than the other leaves: `x`
+    needs twice `y`'s resolution and `y` twice `x`'s, so the factors chase each
+    other upwards and the cap is what stops them."""
+    x = Fluent("x", RealType())
+    y = Fluent("y", RealType())
+    done = Fluent("done", BoolType())
+
+    stir = InstantaneousAction("stir")
+    stir.add_increase_effect(x(), Div(y(), 2))
+    stir.add_increase_effect(y(), Div(x(), 2))
+
+    finish = InstantaneousAction("finish")
+    finish.add_precondition(GE(x(), 1))
+    finish.add_effect(done(), True)
+
+    problem = Problem("chasing")
+    problem.add_fluent(x, default_initial_value=Fraction(1))
+    problem.add_fluent(y, default_initial_value=Fraction(1))
+    problem.add_fluent(done, default_initial_value=False)
+    problem.add_action(stir)
+    problem.add_action(finish)
+    problem.add_goal(done())
+
+    with pytest.raises(NotImplementedError, match="caps it at"):
+        PLASPPlanner(problem, "seq")
+
+
+def test_a_comparison_constant_does_not_force_a_scale_factor():
+    """The other side of the same coin: a fractional constant in a *comparison*
+    puts no factor on anything, because both sides are multiplied through
+    instead. Denominators this coprime used to blow the cap between them; now
+    only the effect's own 1/999983 is a factor, and the guard is stated as the
+    whole-number comparison `999979 * counter >= 3 * 999983`."""
     problem = fractional_counter_problem(step=Fraction(1, 999983),
                                          threshold=Fraction(3, 999979))
     assert MAX_NUMERIC_SCALE < 999983 * 999979
-    with pytest.raises(NotImplementedError, match="caps it at"):
-        PLASPPlanner(problem, "seq")
+    planner = PLASPPlanner(problem, "seq")
+    assert planner.compiled_task.numeric_scale == 999983
+
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick"] * 4 + ["finish"]
+    assert_plan_is_over_original_problem(problem, plan)
 
 
 def test_a_value_too_large_for_a_clingo_term_is_rejected():

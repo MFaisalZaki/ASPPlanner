@@ -41,10 +41,16 @@ from aspplanners.common.errors import UnsupportedTaskError, refusal_from_clingo_
 
 
 def nonlinear_task() -> Problem:
-    """A task outside the fragment: a precondition multiplying two fluents.
+    """A task outside the fragment: a precondition multiplying two fluents the
+    task *writes*.
 
-    The encoder refuses this by inspection, well before clingo is involved --
-    it is the largest refusal family in the benchmark (287 tasks).
+    Both halves matter. A product is refused by inspection, well before clingo
+    is involved -- it is the largest refusal family in the benchmark. But a
+    product only leaves the fragment when neither factor is static: a factor no
+    action writes is a number the grounder reads out of the initial state, which
+    makes the product an ordinary coefficient (see
+    ``test_numeric_effects.test_a_product_with_a_static_factor_is_linear_after_all``).
+    So both fluents here are written, by an action that is never applicable.
     """
     x = Fluent("x", RealType())
     y = Fluent("y", RealType())
@@ -54,10 +60,15 @@ def nonlinear_task() -> Problem:
     act.add_precondition(GE(Times(x, y), 1))
     act.add_effect(done, True)
 
+    stir = InstantaneousAction("stir")
+    stir.add_increase_effect(x, 1)
+    stir.add_increase_effect(y, 1)
+
     problem = Problem("nonlinear")
     problem.add_fluent(x, default_initial_value=2)
     problem.add_fluent(y, default_initial_value=3)
     problem.add_fluent(done, default_initial_value=False)
+    problem.add_action(stir)
     problem.add_action(act)
     problem.add_goal(done)
     return problem

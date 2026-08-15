@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from fractions import Fraction
 from itertools import chain
+from math import gcd
 
 from unified_planning.engines.compilers.utils import replace_action
 from unified_planning.shortcuts import OperatorKind
@@ -22,9 +23,10 @@ from unified_planning.plans import ActionInstance
 from aspplanners.common.tim_typer import TIMTypeInferenceCompiler
 from aspplanners.plasp.rescale import (
     apply_duration_scales,
+    apply_value_scales,
     duration_fluent_scales,
-    scale_numeric_constants,
-    static_numeric_folds,
+    numeric_value_scales,
+    stored_value_gcds,
 )
 from aspplanners.common.compilation import (
     compose_map_backs,
@@ -60,6 +62,7 @@ from aspplanners.plasp.facts import (
     ASPDisjunction,
     ASPGoalDisjunction,
 )
+from aspplanners.plasp.numeric_terms import NumericContext
 
 
 def _check_asp_name_collisions(problem: Problem, action_names) -> None:
@@ -225,25 +228,21 @@ class PLASPEncoder:
             new_problem.add_action(self._remove_delete_then_set(a))
         order.run('restate-actions')
 
-        # step two put the task's numeric values on an integer grid, since clingo
-        # terms are integers. A no-op -- and no rewrite at all -- unless the task
-        # actually states a fractional value.
+        # step two work out what each numeric fluent's values have to be
+        # multiplied by for clingo, whose terms are integers. Every factor is 1
+        # -- and nothing is rewritten at all -- unless the task states a
+        # fractional value or moves a fluent by a fractional multiple of another.
         #
-        # It has to happen before the durative split further down, which copies
-        # the conditions and effects into fresh snap actions: those are what gets
-        # encoded, so rescaling afterwards would be silently dropped on every
-        # temporal task. It reaches the initial-state *defaults* directly rather
-        # than waiting for initialize_fluent_defaults, because hoisting that call
-        # above the split would feed zeros into the time grid (see
-        # common.temporal._duration_values).
-        #
-        # The fold plan is worked out here, on the same actions the factor is
-        # computed from, and handed to the fact builder further down: a static
-        # fluent an effect reads with a fractional coefficient is looked up in
-        # the initial state at grounding time instead, and the factor is what
-        # makes that lookup divide exactly.
-        static_folds = static_numeric_folds(new_problem)
-        numeric_scale = scale_numeric_constants(new_problem, static_folds)
+        # Only the *factors* are computed here, from the task's own actions; they
+        # are applied to the initial state much further down, once it is complete
+        # (see `values-scaled`). Computing them here is what makes them cover the
+        # durative split below, which copies conditions and effects into fresh
+        # snap actions: those are what gets encoded, so a factor worked out
+        # afterwards would miss every temporal task.
+        value_scales = numeric_value_scales(new_problem)
+        numeric_scale = 1
+        for factor in value_scales.values():
+            numeric_scale = numeric_scale * factor // gcd(numeric_scale, factor)
         order.run('rescale', after=('restate-actions',))
 
         # Both of the above restate an action rather than replacing it, so one
@@ -285,38 +284,43 @@ class PLASPEncoder:
         # states, not from the integer stand-ins these factors produce.
         duration_scales = duration_fluent_scales(new_problem)
         order.run('duration-scales-computed', after=('compilers',))
-        time_unit, durative_facts, snap_actions, asp_actions = \
-            self._split_durative_actions(new_problem, duration_scales)
-        order.run('durative-split', after=('rescale', 'duration-scales-computed'))
 
-        # Names are sanitized ('-' -> '_') at fact-rendering time by
-        # asp_facts.asp_name and mapped back the same way during plan
-        # extraction; make sure that mapping is injective for this task.
-        _check_asp_name_collisions(new_problem, [a.name for a, _guard in asp_actions])
-
-        # A fluent is "static" iff no action ever lists it in its effects.
-        # Folding positive preconditions on such fluents into the action
-        # signature body lets the grounder pre-filter parameter bindings
-        # by the static relation (see ASPAction docstring).
+        # A fluent is "static" iff no action ever lists it in its effects. Two
+        # things ride on that: a positive precondition on one is folded into the
+        # action signature body, so the grounder pre-filters parameter bindings
+        # by the static relation (see ASPAction docstring); and its *value* is
+        # whatever the initial state says, so an expression multiplying two
+        # fluents is linear after all as long as one side reads only these (see
+        # numeric_terms.NumericContext). Read before the durative split, which
+        # copies each durative action's effects into its snaps and so writes
+        # exactly the same fluents.
         modified_fluent_names = set()
         for a in new_problem.actions:
             for eff in _all_effects(a):
                 modified_fluent_names.add(eff.fluent._content.payload.name)
         static_fluent_names = {f.name for f in new_problem.fluents if f.name not in modified_fluent_names}
 
-        # The fold plan was drawn up before the compilers ran, against the
-        # actions as the task stated them. Nothing between there and here adds an
-        # effect target -- the conditional-effect remover redistributes effects
-        # across action variants and the durative split copies them into snaps --
-        # so this holds. It is asserted rather than assumed because the failure
-        # would be silent: folding a fluent an action *does* write would read its
-        # initial value at every step and return a wrong plan, not an error.
-        drifted = set(static_folds) - static_fluent_names
-        if drifted:
-            raise NotImplementedError(
-                f"Fluent(s) {sorted(drifted)} were static when the numeric scale was "
-                f"computed and are written by an action after compilation, so their "
-                f"values cannot be folded into effect arithmetic as planned.")
+        # What the fact builders need to know about this task's numbers: the
+        # factor each fluent's stored values carry, which of them no action
+        # writes, and what every one of a fluent's stored values is a multiple
+        # of -- the last is what lets a folded coefficient be divided back into
+        # the task's own units exactly rather than truncated. Built here because
+        # the durative split below already needs it, for the over-all conditions
+        # it lifts out of each durative action.
+        numeric_context = NumericContext(
+            value_scales=value_scales,
+            stored_scales=value_scales,
+            static_fluents=static_fluent_names,
+            value_gcds=stored_value_gcds(new_problem, value_scales))
+
+        time_unit, durative_facts, snap_actions, asp_actions = \
+            self._split_durative_actions(new_problem, duration_scales, numeric_context)
+        order.run('durative-split', after=('rescale', 'duration-scales-computed'))
+
+        # Names are sanitized ('-' -> '_') at fact-rendering time by
+        # asp_facts.asp_name and mapped back the same way during plan
+        # extraction; make sure that mapping is injective for this task.
+        _check_asp_name_collisions(new_problem, [a.name for a, _guard in asp_actions])
 
         # Fill in default values (bool False, int 0) BEFORE the initial-state
         # facts are emitted: an uninitialized numeric fluent would otherwise
@@ -332,6 +336,11 @@ class PLASPEncoder:
         apply_duration_scales(new_problem, duration_scales)
         order.run('duration-scales-applied', after=('defaults',))
 
+        # And the value factors, for the same reason: the defaults laid down
+        # just above are values like any other and have to be on the same grid.
+        apply_value_scales(new_problem, value_scales)
+        order.run('values-scaled', after=('defaults',))
+
         # False initial values are dropped, because a variable that is only ever
         # read as true needs no holds/3 chain for its false side and every such
         # chain propagates through every step. A variable read as *false*
@@ -340,10 +349,10 @@ class PLASPEncoder:
         # step-0 fact it can never be satisfied. That is what makes
         # up_negative_conditions_remover unnecessary -- the encoding tracks the
         # false value directly instead of a task needing a mirror fluent.
-        asp_actions = [(ASPAction(action, static_fluent_names, guard, static_folds), guard)
+        asp_actions = [(ASPAction(action, static_fluent_names, guard, numeric_context), guard)
                        for action, guard in asp_actions]
         goal_terms = list(chain.from_iterable(
-            self._generate_asp_goal_state(g) for g in new_problem.goals))
+            self._generate_asp_goal_state(g, numeric_context) for g in new_problem.goals))
         negated_fluents = set().union(*(a.negated_fluents for a, _guard in asp_actions)) \
             if asp_actions else set()
         negated_fluents |= {g.fluent_name for g in goal_terms
@@ -388,7 +397,7 @@ class PLASPEncoder:
     # Temporal: durative actions -> snap actions + temporal facts
     # ------------------------------------------------------------------
 
-    def _split_durative_actions(self, problem: Problem, duration_scales=None):
+    def _split_durative_actions(self, problem: Problem, duration_scales=None, context=None):
         """Decompose every durative action into its two snap actions.
 
         Returns ``(time_unit, durative_facts, snap_actions, asp_actions)``: the
@@ -414,7 +423,7 @@ class PLASPEncoder:
             snap_actions[asp_name(snap.end.name)] = (snap.action.name, 'end')
             durative_facts.append(ASPDurativeAction(
                 snap.action, snap.start.name, snap.end.name, snap.duration, snap.overall,
-                duration_scales))
+                duration_scales, context))
         return unit, durative_facts, snap_actions, asp_actions
 
     def _remove_delete_then_set(self, dirty_action: Action) -> Action:
@@ -470,7 +479,7 @@ class PLASPEncoder:
                 _add_effect(fixed_action, eff, timing)
         return fixed_action
 
-    def _generate_asp_goal_state(self, goal_state):
+    def _generate_asp_goal_state(self, goal_state, context=None):
         goal_predicates = [goal_state] if goal_state.node_type != OperatorKind.AND else goal_state.args
         ret_goals = []
         for g in goal_predicates:
@@ -479,9 +488,11 @@ class PLASPEncoder:
             # else is a boolean/object state goal, parsed the same way a
             # precondition is so that negation and `forall` behave identically.
             if is_numeric_comparison(g):
-                ret_goals.append(ASPNumGoal(g))
+                ret_goals.append(ASPNumGoal(g, context) if context is not None
+                                 else ASPNumGoal(g))
                 continue
-            for atom in flatten_atoms(parseexpr(g)):
+            for atom in flatten_atoms(parseexpr(g) if context is None
+                                      else parseexpr(g, context=context)):
                 if isinstance(atom, ASPDisjunction):
                     ret_goals.append(ASPGoalDisjunction(atom, len(ret_goals)))
                 elif isinstance(atom, ASPNumComparison):

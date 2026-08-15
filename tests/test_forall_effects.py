@@ -222,17 +222,24 @@ def test_an_equality_gates_the_postcondition_not_a_disjunct():
         f"the equality gates the wrong rule: {carrying[0]}")
 
 
-def test_a_conditional_numeric_effect_is_refused_not_mis_encoded():
-    """An increase cannot be made conditional: ``numEffect`` is read off
-    ``occurs/2``, where the effect's condition has nowhere to go. It is raised
-    rather than silently encoded as an assignment of the delta."""
+def test_a_conditional_numeric_effect_is_encoded_as_a_gated_delta():
+    """An increase carries its condition on the numeric layer's own vocabulary,
+    not on ``postcondition``: the delta is collected when the effect term fires
+    and applied to the fluent's previous value, so it is a *delta* rather than
+    (as an assignment of it would be) the new value."""
     task = parse_case("briefcase", "problem-carry.pddl")
     tax = task.action("tax")
     tax.clear_effects()
     tax.add_increase_effect(task.fluent("weight")(task.object("d")), 2,
                             condition=task.fluent("in")(task.object("d")))
-    with pytest.raises(NotImplementedError, match="conditional numeric effect"):
-        PLASPPlanner(task)
+    planner = PLASPPlanner(task)
+    facts = planner.task_facts
+    assert 'numCondEffect(action(("tax")), effect((cond,"tax",0)), ' \
+           'variable(("weight",constant("d"))), 2)' in facts
+    # The condition rides on the effect term, exactly as a boolean one does.
+    assert 'precondition(effect((cond,"tax",0)), variable(("in",constant("d"))), ' \
+           'value(variable(("in",constant("d"))), true))' in facts
+    assert planner.compilationlist == []
 
 
 def test_a_conditional_constant_assignment_is_still_encoded():

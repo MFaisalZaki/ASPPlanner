@@ -112,6 +112,13 @@ PREDICATE_REQUIRES: Dict[str, Tuple[str, ...]] = {
     'numOverall': ('numeric',),
     'orDisjunctNum': ('numeric',),
     'goalOrDisjunctNum': ('numeric',),
+    # A conditional numeric effect reads its condition through the same
+    # orGroup/orGroupHolds pair core's caused/3 does, and a *numeric* condition
+    # on one is stated as a group of its own, so the numeric layer's conditional
+    # rules need the disjunctive layer whenever they are used at all.
+    'numCondEffect': ('disjunctive',),
+    'numCondEffectExpr': ('disjunctive',),
+    'numCondAssignExpr': ('disjunctive',),
 }
 
 
@@ -142,7 +149,7 @@ SEQ_LAYERS: Tuple[Layer, ...] = (
         owns=frozenset({
             'numVariable', 'numConst', 'numTerm', 'numPrecondition',
             'numEffect', 'numAssign', 'numEffectExpr', 'numAssignExpr',
-            'numGoal',
+            'numGoal', 'numCondEffect', 'numCondEffectExpr', 'numCondAssignExpr',
         }),
         kind_features=(
             'has_int_fluents', 'has_real_fluents', 'has_numeric_fluents',

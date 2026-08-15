@@ -3,7 +3,11 @@
 %
 %   owns:     numVariable/1 numConst/2 numTerm/3 numPrecondition/4 numEffect/3
 %             numAssign/3 numEffectExpr/3 numAssignExpr/3 numGoal/3
+%             numCondEffect/4 numCondEffectExpr/4 numCondAssignExpr/4
 %   requires: core (holds/3, occurs/2, the caused/modified inertia)
+%             disjunctive, but only where a conditional numeric effect carries a
+%             disjunctive (or numeric) condition -- read through `#defined`
+%             orGroup/orGroupHolds, so the rules are inert without it
 %
 % Numeric fluents ride on core's holds/3 chain -- a numeric variable's value is
 % carried as `holds(V, value(V, X), t)`, so core's inertia rule propagates it and
@@ -42,6 +46,18 @@
 #defined numAssign/3.
 #defined numEffectExpr/3.
 #defined numAssignExpr/3.
+#defined numCondEffect/4.
+#defined numCondEffectExpr/4.
+#defined numCondAssignExpr/4.
+
+% Read by the conditional-effect rules below, which are how a numeric effect
+% gets a condition. `precondition/3` is core's; the orGroup pair is the
+% disjunctive layer's, and is also where a *numeric* condition on a conditional
+% effect lives -- the encoder states it as a one-disjunct group, so it is judged
+% by that layer's difference #sum rather than needing a rule of its own here.
+#defined precondition/3.
+#defined orGroup/2.
+#defined orGroupHolds/3.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % Initial state
@@ -64,6 +80,8 @@ numval(V, X, 0) :- holds(V, value(V, X), 0), numVariable(V).
 % it, so a task without expression effects grounds no numValue at all.
 numValueNeeded(E) :- numEffectExpr(_, _, E).
 numValueNeeded(E) :- numAssignExpr(_, _, E).
+numValueNeeded(E) :- numCondEffectExpr(_, _, _, E).
+numValueNeeded(E) :- numCondAssignExpr(_, _, _, E).
 numValue(E, S + C, 0) :- numValueNeeded(E), numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V), numval(V, X, 0) }.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -106,6 +124,47 @@ caused(V, value(V, K), t) :- occurs(A, t), numAssign(A, V, K).
 % forms so a task without them grounds exactly what it did before.
 caused(V, value(V, X + D), t) :- occurs(A, t), numEffectExpr(A, V, E), holds(V, value(V, X), t - 1), numValue(E, D, t - 1).
 caused(V, value(V, D), t) :- occurs(A, t), numAssignExpr(A, V, E), numValue(E, D, t - 1).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Conditional numeric effects
+%
+% A conditional *boolean* effect rides on core's caused/3, which states the
+% variable's new value outright -- and so does a conditional numeric assignment
+% of a constant. The other numeric shapes cannot: a delta's new value is the old
+% one plus something, and PDDL's reading of two deltas that both fire is that
+% they *add*. Two caused/3 atoms would be two states rather than one sum, so the
+% deltas are collected first and applied once.
+%
+% An effect fires under exactly the conditions core's caused/3 fires one: every
+% precondition/3 atom of its effect term holds at the step before, and so does
+% every disjunctive group the term carries. A numeric condition is one of those
+% groups (a single disjunct holding a single comparison), which is what lets it
+% be judged by the disjunctive layer's difference #sum instead of a rule here.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+numCondTerm(A, Eff) :- numCondEffect(A, Eff, _, _).
+numCondTerm(A, Eff) :- numCondEffectExpr(A, Eff, _, _).
+numCondTerm(A, Eff) :- numCondAssignExpr(A, Eff, _, _).
+
+numEffectFires(A, Eff, t) :- occurs(A, t), numCondTerm(A, Eff),
+    holds(VariablePre, ValuePre, t - 1) : precondition(Eff, VariablePre, ValuePre);
+    orGroupHolds(Eff, G, t) : orGroup(Eff, G).
+
+% One element per firing delta, keyed by its effect term so that two effects
+% with the same delta both count -- and so that a `forall` conditional effect,
+% whose term carries the binding, contributes once per binding.
+numDelta(V, Eff, D, t) :- numCondEffect(A, Eff, V, D), numEffectFires(A, Eff, t).
+numDelta(V, Eff, D, t) :- numCondEffectExpr(A, Eff, V, E), numEffectFires(A, Eff, t),
+                          numValue(E, D, t - 1).
+numDeltaFired(V, t) :- numDelta(V, _, _, t).
+caused(V, value(V, X + S), t) :- numDeltaFired(V, t), holds(V, value(V, X), t - 1),
+                                 S = #sum { D, Eff : numDelta(V, Eff, D, t) }.
+
+% A conditional assignment whose value reads the state, evaluated at t-1 like
+% any other expression. The constant case never reaches here: it rides on
+% core's postcondition/caused, exactly as a conditional boolean effect does.
+caused(V, value(V, D), t) :- numCondAssignExpr(A, Eff, V, E), numEffectFires(A, Eff, t),
+                             numValue(E, D, t - 1).
 
 numval(V, X, t) :- holds(V, value(V, X), t), numVariable(V).
 numValue(E, S + C, t) :- numValueNeeded(E), numConst(E, C), S = #sum { X * K, V : numTerm(E, K, V), numval(V, X, t) }.

@@ -543,9 +543,11 @@ def _fractional_alongside(problem, duration_fluent_in_condition=False):
     burn.add_increase_effect(fuel(), Fraction(1, 2))
     if duration_fluent_in_condition:
         # `travel-time` is what `drive` reads its duration off, so asking for it
-        # in scaled units too is contradictory.
+        # in scaled units too is contradictory -- but only once it needs a
+        # factor of its own, which a fractional value is what forces.
         travel = task.fluent("travel-time")
         locations = list(task.all_objects)
+        task.set_initial_value(travel(locations[0], locations[1]), Fraction(3, 2))
         burn.add_precondition(LE(travel(locations[0], locations[1]), 1))
     task.add_action(burn)
     return task
@@ -568,13 +570,32 @@ def test_rescaling_numeric_values_leaves_the_durations_alone():
     assert durations(scaled) == durations(plain)
 
 
-def test_a_duration_fluent_read_in_a_numeric_condition_is_rejected():
-    """`travel-time` is looked up in the initial state at grounding time, so its
-    value is in the task's own units; a condition that needs it in the rescaled
-    ones cannot have both."""
+def test_a_fractional_duration_fluent_read_in_a_numeric_condition_is_rejected():
+    """`travel-time` is looked up in the initial state at grounding time, and a
+    fractional value puts it on a grid of its own; a condition reading it would
+    then see the scaled stand-in, and it cannot be both."""
     task = _fractional_alongside(parse("tempdrive"), duration_fluent_in_condition=True)
     with pytest.raises(NotImplementedError, match="read as a durative action's duration"):
         PLASPPlanner(task)
+
+
+def test_an_integral_duration_fluent_may_still_be_compared():
+    """The conflict is about the *grid*, not about the two readings. A duration
+    fluent whose values are already whole needs no factor, so comparing it
+    alongside a task that rescales something else is fine -- which a task-wide
+    factor could not have allowed, since it would have moved this fluent too."""
+    from unified_planning.shortcuts import LE as _LE
+
+    task = _fractional_alongside(parse("tempdrive"))
+    travel = task.fluent("travel-time")
+    locations = list(task.all_objects)
+    burn = next(a for a in task.actions if a.name == "burn")
+    burn.add_precondition(_LE(travel(locations[0], locations[1]), 10))
+
+    planner = PLASPPlanner(task)
+    assert planner.compiled_task.numeric_scale == 2
+    assert any(line.startswith("numPrecondition(")
+               for line in planner.compiled_task.fact_lines)
 
 
 def test_a_temporal_task_with_fractional_values_still_schedules():

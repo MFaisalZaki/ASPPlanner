@@ -293,9 +293,9 @@ def test_a_static_fluent_read_is_supported_too():
 # ---------------------------------------------------------------------------
 
 def test_a_fractional_constant_beside_a_fluent_term_is_rescaled():
-    """`x += y + 1/2` is put on the integer grid by doubling the task: the
-    expression's constant becomes 1 and y's initial value 2, while y's
-    coefficient stays 1 -- it commutes with the scaling."""
+    """`x += y + 1/2` is put on the integer grid by storing *x* doubled: the
+    delta becomes `2*y + 1`, and `y` -- which the effect only reads -- keeps its
+    own units, so nothing but the fluent that needed the finer grid gets one."""
     def creep(tick, x, y):
         tick.add_increase_effect(x(), Plus(y(), Fraction(1, 2)))
 
@@ -305,10 +305,10 @@ def test_a_fractional_constant_beside_a_fluent_term_is_rescaled():
 
     assert numeric_facts(planner.compiled_task, "numEffectExpr(") == [
         'numEffectExpr(action(("tick")), variable(("x")), '
-        'expr(variable(("y")), 1)) :- action(action(("tick"))).'
+        'expr(sum((variable(("y")),2)), 1)) :- action(action(("tick"))).'
     ]
     initial = numeric_facts(planner.compiled_task, "initialState(")
-    assert any('value(variable(("y")), 2))' in line for line in initial), initial
+    assert any('value(variable(("y")), 1))' in line for line in initial), initial
 
     # y = 1, so each tick adds 3/2; the plan is checked in the task's own units.
     plan = planner.plan()
@@ -319,9 +319,11 @@ def test_a_fractional_constant_beside_a_fluent_term_is_rescaled():
 
 def test_a_fractional_coefficient_on_a_static_fluent_is_folded_in():
     """`x += y/2` where `y` is static: the coefficient never reaches the
-    encoding, because the grounder can read y's value out of the initial state
-    and do the division itself. The task's scale is what makes it exact -- the
-    divisor 2 multiplies in, so y's stored value is even by construction."""
+    encoding as a coefficient, because the grounder can read y's value out of
+    the initial state. `x`'s own factor of 2 is what makes the arithmetic whole,
+    so the folded delta is the looked-up value itself and no division is left --
+    which is what keeps the effect a constant `numEffect` rather than an
+    expression whose value has to be reified per step."""
     def half(tick, x, y):
         tick.add_increase_effect(x(), Div(y(), 2))
 
@@ -330,9 +332,9 @@ def test_a_fractional_coefficient_on_a_static_fluent_is_folded_in():
     assert planner.compiled_task.numeric_scale == 2
 
     assert numeric_facts(planner.compiled_task, "numEffect(") == [
-        'numEffect(action(("tick")), variable(("x")), (RAWEFF0)/2) :- '
+        'numEffect(action(("tick")), variable(("x")), RAWSTAT0) :- '
         'action(action(("tick"))), '
-        'initialState(variable(("y")), value(variable(("y")), RAWEFF0)).'
+        'initialState(variable(("y")), value(variable(("y")), RAWSTAT0)).'
     ]
 
     # y = 1, so each tick adds 1/2 and the threshold of 3 needs six of them.
@@ -342,15 +344,39 @@ def test_a_fractional_coefficient_on_a_static_fluent_is_folded_in():
     assert_plan_is_over_original_problem(problem, plan)
 
 
-def test_a_fractional_coefficient_on_a_written_fluent_is_still_rejected():
-    """The same effect on a fluent an action *writes* has nothing to fold: a
-    comparison would be multiplied through, but an effect's value cannot be, and
-    the task-wide rescale scales values, not coefficients."""
+def test_a_fractional_coefficient_on_a_written_fluent_is_cleared_by_the_target():
+    """The same effect where `y` is written too, so its value cannot be looked
+    up. Nothing is folded and nothing needs to be: storing `x` twice as fine
+    makes the 1/2 the whole coefficient 1, and only `x` moves."""
     def half(tick, x, y):
         tick.add_increase_effect(x(), Div(y(), 2))
-        tick.add_increase_effect(y(), 0)      # y is no longer static
+        tick.add_increase_effect(y(), 1)      # y is no longer static
 
-    problem = delta_problem(half, fluent_type=RealType())
+    problem = delta_problem(half, threshold=3, fluent_type=RealType())
+    planner = PLASPPlanner(problem, "seq")
+    assert planner.compiled_task.numeric_scale == 2
+    assert numeric_facts(planner.compiled_task, "numEffectExpr(") == [
+        'numEffectExpr(action(("tick")), variable(("x")), '
+        'expr(variable(("y")), 0)) :- action(action(("tick"))).'
+    ]
+
+    # y starts at 1 and grows by 1 a tick, so x gains 1/2, 1, 3/2, ... and
+    # passes 3 on the third tick.
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick"] * 3 + ["finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_self_referential_fractional_coefficient_is_still_rejected():
+    """`x += x/2` is the one shape no scaling reaches: whatever `x` is stored
+    multiplied by, the coefficient it needs is halved by the same factor. This
+    is sailing-wind's `v := 0.9 v + ...`, and it is a real boundary of an
+    integer encoding rather than a gap in the scaling."""
+    def compound(tick, x, y):
+        tick.add_increase_effect(x(), Div(x(), 2))
+
+    problem = delta_problem(compound, start=1, fluent_type=RealType())
     with pytest.raises(NotImplementedError, match="fractional coefficient"):
         PLASPPlanner(problem, "seq")
 
@@ -359,18 +385,20 @@ def test_a_fractional_coefficient_on_a_written_fluent_is_still_rejected():
 # The boundary: past linear is still out, now at encoding time
 # ---------------------------------------------------------------------------
 
-def test_a_product_of_fluents_is_still_rejected():
+def test_a_product_of_two_written_fluents_is_still_rejected():
     def multiply(tick, x, y):
         tick.add_increase_effect(x(), Times(x(), y()))
+        tick.add_increase_effect(y(), 1)      # y is written, so nothing to fold
 
     problem = delta_problem(multiply)
     with pytest.raises(NotImplementedError, match="not linear"):
         PLASPPlanner(problem, "seq")
 
 
-def test_a_non_linear_condition_is_still_rejected():
+def test_a_non_linear_condition_over_two_written_fluents_is_still_rejected():
     def creep(tick, x, y):
         tick.add_increase_effect(x(), y())
+        tick.add_increase_effect(y(), 1)
 
     problem = delta_problem(creep)
     x, y = problem.fluent("x"), problem.fluent("y")
@@ -379,22 +407,72 @@ def test_a_non_linear_condition_is_still_rejected():
         PLASPPlanner(problem, "seq")
 
 
+def test_a_product_with_a_static_factor_is_linear_after_all():
+    """zenotravel's `(* (distance ?c1 ?c2) (slow-burn ?a))`, in miniature: `y` is
+    a table rather than state, so the grounder reads its value out of the
+    initial state and the product is an ordinary coefficient by the time the
+    rule grounds."""
+    def scaled(tick, x, y):
+        tick.add_increase_effect(x(), Times(x(), y()))
+
+    problem = delta_problem(scaled, start=1, threshold=4, helper_value=1)
+    planner = PLASPPlanner(problem, "seq")
+
+    effects = numeric_facts(planner.compiled_task, "numEffectExpr(")
+    assert len(effects) == 1, effects
+    assert 'initialState(variable(("y")), value(variable(("y")), RAWSTAT0))' in effects[0]
+    assert 'sum((variable(("x")),RAWSTAT0))' in effects[0]
+
+    # y is 1, so x doubles every tick: 1, 2, 4 -- two ticks to reach 4.
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick", "tick", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_static_product_in_a_condition_is_looked_up_at_grounding_time():
+    """The same fold on the condition side, where the comparison is multiplied
+    through rather than scaled -- so it works even when the looked-up value
+    could not have been divided back out exactly."""
+    def creep(tick, x, y):
+        tick.add_increase_effect(x(), 1)
+
+    problem = delta_problem(creep, threshold=1, helper_value=2)
+    x, y = problem.fluent("x"), problem.fluent("y")
+    problem.add_goal(GE(x(), Times(y(), y())))
+
+    planner = PLASPPlanner(problem, "seq")
+    goals = numeric_facts(planner.compiled_task, "numGoal(")
+    assert len(goals) == 1 and "RAWSTAT0" in goals[0], goals
+
+    # y is 2, so the goal is x >= 4: four ticks, plus the `finish` that sets
+    # `done` (which the search is free to place as soon as x >= 1).
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    names = [ai.action.name for ai in plan.actions]
+    assert names.count("tick") == 4 and names.count("finish") == 1, names
+    assert_plan_is_over_original_problem(problem, plan)
+
+
 # ---------------------------------------------------------------------------
-# Conditional numeric effects, lifted into preconditions by a UP compiler
+# Conditional numeric effects, stated by the numeric layer itself
 # ---------------------------------------------------------------------------
 
-def test_a_conditional_numeric_delta_is_compiled_away_and_solved():
+def test_a_conditional_numeric_delta_is_encoded_natively_and_solved():
     """`when (y = 1) then x += 1`: caused/3 carries a variable's *new* value, so
-    a conditional increase has nowhere to put its condition. The planner asks UP
-    to lift it into the action's precondition, where both halves are ordinary
-    supported shapes -- petrobras' `sail` in miniature."""
+    a conditional increase cannot ride on it -- the numeric layer collects the
+    deltas that fire and applies their sum instead. Petrobras' `sail` in
+    miniature, and no compiler is asked for."""
     def gated(tick, x, y):
         tick.add_increase_effect(x(), 1, condition=Equals(y(), 1))
 
     problem = delta_problem(gated)
     planner = PLASPPlanner(problem, "seq")
-    assert planner.compilationlist == [
-        ['up_conditional_effects_remover', CompilationKind.CONDITIONAL_EFFECTS_REMOVING]]
+    assert planner.compilationlist == []
+    assert numeric_facts(planner.compiled_task, "numCondEffect(") == [
+        'numCondEffect(action(("tick")), effect((cond,"tick",0)), variable(("x")), 1) '
+        ':- action(action(("tick"))).'
+    ]
 
     # y is 1, so the guard always holds and each tick adds 1.
     plan = planner.plan()
@@ -403,18 +481,110 @@ def test_a_conditional_numeric_delta_is_compiled_away_and_solved():
     assert_plan_is_over_original_problem(problem, plan)
 
 
-def test_a_numeric_condition_on_a_conditional_effect_is_compiled_away():
+def test_two_conditional_deltas_on_one_fluent_add_up():
+    """PDDL's own reading, and the reason a delta cannot ride on caused/3: two
+    effects that both fire contribute both deltas. Stated as two `caused` atoms
+    they would be two different new values -- not a state at all."""
+    def gated(tick, x, y):
+        tick.add_increase_effect(x(), 1, condition=GE(y(), 1))
+        tick.add_increase_effect(x(), 2, condition=GE(y(), 1))
+
+    problem = delta_problem(gated, threshold=6)
+    planner = PLASPPlanner(problem, "seq")
+
+    # y is 1, so both fire and each tick adds 3: two ticks reach 6.
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick", "tick", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_conditional_delta_adds_to_an_unconditional_one():
+    """The same sum, with one of the two effects unguarded. The unconditional
+    delta joins the sum rather than staying on `numEffect`, or the two would
+    again be two `caused` atoms."""
+    def gated(tick, x, y):
+        tick.add_increase_effect(x(), 1)
+        tick.add_increase_effect(x(), 2, condition=GE(y(), 1))
+
+    problem = delta_problem(gated, threshold=6)
+    planner = PLASPPlanner(problem, "seq")
+    assert numeric_facts(planner.compiled_task, "numEffect(") == []
+
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick", "tick", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_conditional_delta_whose_guard_fails_does_not_fire():
+    """The half a wrongly-unconditional encoding would get away with above."""
+    def gated(tick, x, y):
+        tick.add_increase_effect(x(), 1)
+        tick.add_increase_effect(x(), 2, condition=GE(y(), 5))
+
+    problem = delta_problem(gated, threshold=3, helper_value=1)
+    planner = PLASPPlanner(problem, "seq")
+
+    # y is 1, so only the unconditional +1 fires: three ticks, not one.
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick"] * 3 + ["finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_conditional_assignment_reading_the_state_is_encoded_natively():
+    """`when (y >= 1) then x := y + 5`: the assigned value is evaluated at the
+    step before, like any expression effect, and gated like any conditional
+    one."""
+    def gated(tick, x, y):
+        tick.add_effect(x(), Plus(y(), 5), condition=GE(y(), 1))
+
+    problem = delta_problem(gated, threshold=6)
+    planner = PLASPPlanner(problem, "seq")
+    assert planner.compilationlist == []
+    assert numeric_facts(planner.compiled_task, "numCondAssignExpr(")
+
+    # y is 1, so one tick sets x to 6.
+    plan = planner.plan()
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tick", "finish"]
+    assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_numeric_condition_on_a_conditional_effect_is_encoded_natively():
     """The other half of the same refusal: caused/3 reads an effect's condition
-    off precondition/3, which is boolean, so a numeric one has to move too."""
+    off precondition/3, which is boolean. A numeric one becomes a one-disjunct
+    group of the effect term instead, judged by the disjunctive layer's
+    difference #sum -- which is why that layer is loaded for it."""
     def gated(tick, x, y):
         tick.add_effect(x(), 9, condition=GE(y(), 1))
 
     problem = delta_problem(gated)
     planner = PLASPPlanner(problem, "seq")
+    assert planner.compilationlist == []
+    assert "disjunctive" in planner.layers
+    assert any(line.startswith("orDisjunctNum(effect((cond,")
+               for line in planner.compiled_task.fact_lines)
+
     plan = planner.plan()
     assert planner.status == Status.SOLVED_SATISFICING, planner.logs
     assert [ai.action.name for ai in plan.actions] == ["tick", "finish"]
     assert_plan_is_over_original_problem(problem, plan)
+
+
+def test_a_numeric_condition_that_fails_keeps_the_effect_from_firing():
+    """The same shape with a guard the state does not meet: the effect must not
+    fire, which a group that is merely *declared* rather than *checked* would
+    let it do."""
+    def gated(tick, x, y):
+        tick.add_effect(x(), 9, condition=GE(y(), 5))
+
+    problem = delta_problem(gated, helper_value=1)
+    planner = PLASPPlanner(problem, "seq")
+    planner.plan(max_horizon=6)
+    assert planner.status != Status.SOLVED_SATISFICING, (
+        "the effect fired although its numeric condition is false")
 
 
 def test_a_conditional_constant_assignment_still_takes_the_native_path():
@@ -434,15 +604,16 @@ def test_a_conditional_constant_assignment_still_takes_the_native_path():
 
 def test_a_conditional_delta_over_a_static_fluent_combines_both_paths():
     """Petrobras' `sail`, in miniature: the condition is numeric *and* the delta
-    reads a static fluent with a fractional coefficient. The compiler lifts the
-    condition into a precondition and the fold turns the coefficient into
-    grounding-time arithmetic; neither alone is enough."""
+    reads a static fluent with a fractional coefficient. The condition becomes a
+    group of the effect term and the fold turns the coefficient into
+    grounding-time arithmetic; neither alone is enough, and neither needs a
+    compiler."""
     def gated(tick, x, y):
         tick.add_increase_effect(x(), Div(y(), 2), condition=Equals(y(), 1))
 
     problem = delta_problem(gated, fluent_type=RealType())
     planner = PLASPPlanner(problem, "seq")
-    assert planner.compilationlist != []
+    assert planner.compilationlist == []
     assert planner.compiled_task.numeric_scale == 2
 
     plan = planner.plan()
