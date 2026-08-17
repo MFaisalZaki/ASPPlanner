@@ -181,6 +181,72 @@ def test_the_registry_knows_every_fact_the_encoder_emits():
 
 
 # ---------------------------------------------------------------------------
+# ... and the other direction: the registry answers to the .lp files
+# ---------------------------------------------------------------------------
+#
+# `test_the_registry_knows_every_fact_the_encoder_emits` checks facts against
+# the registry. Nothing checked the registry against the *rules*, so a claim of
+# ownership was self-certifying -- and that is the direction that can be
+# silently wrong. If layer A claims a predicate whose consuming rule actually
+# lives in layer B, emitting the fact selects A, B stays unloaded, and B's
+# constraint quietly disappears from the program: exactly the failure the module
+# docstring says the safety net exists to prevent.
+
+def _rule_predicates(layer_name):
+    """The predicate names the *rules* of one layer's .lp mention.
+
+    Directives are the only thing skipped, and on purpose: `#defined p/1.`
+    declares that `p` may be absent, which is not the same as reading it, and
+    counting it would let a layer certify itself with a declaration. Everything
+    else counts -- including the statements `lp_io` calls facts, because a
+    choice rule with no body (`1 {occurs(A,t) : action(A)} 1.`) is one of those
+    and it is where core reads `action`.
+    """
+    from aspplanners.lp_io import parse_lp_file, ASPDirective
+    import re
+    names = set()
+    for statement in parse_lp_file(SEQ.path(layer_name)):
+        if isinstance(statement, ASPDirective):
+            continue
+        names.update(re.findall(r"([a-z_][A-Za-z0-9_]*)\s*\(", str(statement)))
+    return names
+
+
+@pytest.mark.parametrize("layer", SEQ.layers, ids=lambda layer: layer.name)
+def test_every_owned_predicate_is_read_by_a_rule_of_its_own_layer(layer):
+    """A layer owns a fact because its rules consume it. The exception is the
+    vocabulary that describes the instance itself, which is declared as such."""
+    consumed = _rule_predicates(layer.name)
+    claimed = layer.owns - layer.describes_instance
+    unread = sorted(claimed - consumed)
+    assert unread == [], (
+        f"{layer.name} claims {unread}, but no rule in {layer.filename} reads them. "
+        f"Either a rule moved to another layer -- in which case `owns` has to move "
+        f"with it, or selecting this layer will not load the rule -- or the "
+        f"predicate describes the instance and belongs in `describes_instance`.")
+
+
+@pytest.mark.parametrize("layer", SEQ.layers, ids=lambda layer: layer.name)
+def test_instance_vocabulary_is_a_subset_of_what_the_layer_owns(layer):
+    """`describes_instance` annotates `owns`; it never adds to it. A predicate
+    outside `owns` would escape `unregistered` and be silently ignored."""
+    assert layer.describes_instance <= layer.owns
+
+
+def test_the_instance_vocabulary_is_what_the_problem_states():
+    """Pinned so that adding to this set is a deliberate act.
+
+    These come from the problem instance -- its types, its objects, its fluents,
+    the boolean domain -- rather than from the encoding, which is why no rule
+    reads them and why that is not drift.
+    """
+    assert SEQ.by_name["core"].describes_instance == {
+        "type", "constant", "has", "variable", "boolean"}
+    assert all(not layer.describes_instance
+               for layer in SEQ.layers if layer.name != "core")
+
+
+# ---------------------------------------------------------------------------
 # Loading the layers and concatenating them have to be the same program
 # ---------------------------------------------------------------------------
 

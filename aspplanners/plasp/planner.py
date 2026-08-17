@@ -4,13 +4,13 @@ from typing import List, Optional, Tuple
 
 import clingo
 
-from unified_planning.engines import CompilationKind, PlanGenerationResultStatus
+from unified_planning.engines import PlanGenerationResultStatus
 from unified_planning.plans import SequentialPlan, TimeTriggeredPlan, ActionInstance
-from unified_planning.shortcuts import EffectKind
 
-from aspplanners.common.temporal import DEFAULT_TIME_SCALE, all_effects
+from aspplanners.common.errors import refusal_from_clingo_error
+from aspplanners.common.temporal import DEFAULT_TIME_SCALE
 from aspplanners.plasp.encoder import PLASPEncoder
-from aspplanners.plasp.facts import asp_name, is_numeric_comparison
+from aspplanners.plasp.facts import asp_name
 from aspplanners.plasp.layers import FAMILIES, fact_predicates, parse_selection
 from aspplanners.lp_io import ASPStatement, parse_lp_file, dump_lp
 from aspplanners.common.validation import validate_plan
@@ -20,53 +20,6 @@ from aspplanners.common.validation import validate_plan
 ENCODERS = {
     'seq': PLASPEncoder,
 }
-
-
-def _reads_fluent(expression) -> bool:
-    """Does this expression read any fluent, at any depth?"""
-    if expression.is_fluent_exp():
-        return True
-    return any(_reads_fluent(arg) for arg in expression.args)
-
-
-def _has_numeric_comparison(condition) -> bool:
-    """Does this condition test a numeric comparison, at any depth?"""
-    if is_numeric_comparison(condition):
-        return True
-    return any(_has_numeric_comparison(arg) for arg in condition.args)
-
-
-def _needs_conditional_effect_removal(problem) -> bool:
-    """Does the task hold a conditional effect the numeric layer cannot state?
-
-    Mirrors the two places the fact builder refuses one -- a conditional effect
-    whose *value* is a delta or reads the state
-    (:func:`~aspplanners.plasp.facts._conditional_effect_value`), and one whose
-    *condition* is numeric -- so the compiler is asked for exactly the tasks that
-    would otherwise be `UNSUPPORTED`, and for no others.
-
-    A `forall` conditional effect anywhere in the task takes the compiler off the
-    table for all of it: removing one lifts its condition into a precondition,
-    where the quantifier's variable is unbound, and UP raises
-    `UPUnboundedVariablesError` rather than compiling. Those tasks keep the
-    encoding's native `forall`/`when` path, and the refusal with it.
-    """
-    needed = False
-    for action in problem.actions:
-        for effect in all_effects(action):
-            if not effect.is_conditional():
-                continue
-            if effect.forall:
-                return False
-            if _has_numeric_comparison(effect.condition):
-                needed = True
-            elif effect.fluent.type.is_bool_type():
-                continue
-            elif effect.kind in (EffectKind.INCREASE, EffectKind.DECREASE):
-                needed = True
-            elif _reads_fluent(effect.value):
-                needed = True
-    return needed
 
 
 class PLASPPlanner:
@@ -163,24 +116,15 @@ class PLASPPlanner:
         # accept them as long as every constant is integral (clingo terms are
         # integers) and raise otherwise.
         #
-        # The one exception is a conditional effect the *numeric* layer cannot
-        # state: caused/3 carries a variable's new value, which is enough for a
-        # conditional boolean effect or a conditional assignment of a constant,
-        # but not for a conditional increase (whose new value is the old one plus
-        # a delta, read off occurs/2 with no room for the condition) nor for a
-        # numeric condition (which caused/3 reads off precondition/3). Compiling
-        # those away lifts the condition into the action's precondition, where
-        # both are ordinary supported shapes -- petrobras' `sail` becomes two
-        # actions and encodes.
-        #
-        # Gated on that shape rather than on CONDITIONAL_EFFECTS at large: the
-        # ADL families (`schedule`, `miconic-fulladl`, `elevators-00-adl`, ...)
-        # are encoded natively, one postcondition term per effect, and routing
-        # them through a compiler that expands 2^k action variants would trade a
-        # working track for a bigger one.
-        if _needs_conditional_effect_removal(problem):
-            return [['up_conditional_effects_remover',
-                     CompilationKind.CONDITIONAL_EFFECTS_REMOVING]]
+        # A conditional *numeric* effect used to be the one exception, because
+        # caused/3 carries a variable's new value: enough for a conditional
+        # boolean effect or a conditional assignment of a constant, but not for a
+        # conditional increase (whose new value is the old one plus a delta) nor
+        # for a numeric condition (which caused/3 reads off precondition/3).
+        # Those had to be compiled away, at the cost of 2^k action variants. The
+        # numeric layer now states both directly -- the firing deltas are summed
+        # and applied once, and a numeric condition is a one-disjunct group of
+        # the effect term -- so nothing is left that needs the compiler.
         return []
 
     def validate(self, plan) -> Tuple[bool, Optional[str]]:
@@ -259,7 +203,7 @@ class PLASPPlanner:
         if horizon is not None:
             parts = [('base', []), ('check', [clingo.Number(horizon)])]
             parts += [('step', [clingo.Number(t)]) for t in range(1, horizon + 1)]
-            ctl.ground(parts)
+            self._ground(ctl, parts)
             ctl.assign_external(clingo.Function('query', [clingo.Number(horizon)]), True)
             outcome, symbols = self._solve(ctl, deadline)
             if outcome == 'unsat':
@@ -268,7 +212,7 @@ class PLASPPlanner:
                 return self._empty_plan()
             return self._conclude(outcome, symbols, horizon)
 
-        ctl.ground([('base', []), ('check', [clingo.Number(0)])])
+        self._ground(ctl, [('base', []), ('check', [clingo.Number(0)])])
         ctl.assign_external(clingo.Function('query', [clingo.Number(0)]), True)
         for t in range(0, max_horizon + 1):
             outcome, symbols = self._solve(ctl, deadline)
@@ -278,7 +222,7 @@ class PLASPPlanner:
                 break
             # Retire the horizon-t goal test and extend the program by one step.
             ctl.release_external(clingo.Function('query', [clingo.Number(t)]))
-            ctl.ground([('step', [clingo.Number(t + 1)]), ('check', [clingo.Number(t + 1)])])
+            self._ground(ctl, [('step', [clingo.Number(t + 1)]), ('check', [clingo.Number(t + 1)])])
             ctl.assign_external(clingo.Function('query', [clingo.Number(t + 1)]), True)
 
         self.status = PlanGenerationResultStatus.UNSOLVABLE_INCOMPLETELY
@@ -289,6 +233,25 @@ class PLASPPlanner:
     # ------------------------------------------------------------------
     # Solving
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ground(ctl, parts) -> None:
+        """`ctl.ground(parts)`, with a non-representable program reported as a
+        refusal rather than as a crash.
+
+        Grounding is where clingo finds out that the program the encoder built
+        cannot be held in its 32-bit terms -- a `#sum` over the reachable values
+        of an unbounded fluent, typically. The encoder cannot rule that out by
+        inspection (see `aspplanners.common.errors`), so it is classified here,
+        where it surfaces. Anything else clingo raises is left alone.
+        """
+        try:
+            ctl.ground(parts)
+        except RuntimeError as error:
+            refusal = refusal_from_clingo_error(error)
+            if refusal is None:
+                raise
+            raise refusal from error
 
     def _solve(self, ctl, deadline) -> Tuple[str, Optional[list]]:
         """Run one solve call against the current grounding.

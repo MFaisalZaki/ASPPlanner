@@ -13,6 +13,12 @@ from math import gcd
 from unified_planning.shortcuts import FNode, EffectKind
 
 from aspplanners.lp_io import ASPTerm
+from aspplanners.plasp.numeric_terms import (
+    Coeff,
+    InexactCoefficient,
+    NO_FOLDING,
+    NumericContext,
+)
 
 # clingo terms are signed 32-bit and wrap around *silently*: `b(2147483648)`
 # grounds to `b(-2147483648)` and `X = 2147483647*2` to `-2`, with no warning.
@@ -148,7 +154,7 @@ def _quantified_id(names):
     return names[0] if len(names) == 1 else f"({','.join(names)})"
 
 
-def _as_disjunct(f, t, index):
+def _as_disjunct(f, t, index, context=NO_FOLDING):
     """The disjunct one argument of a disjunction contributes.
 
     A conjunctive argument is one disjunct numbered `index`; an ``exists`` is a
@@ -158,15 +164,22 @@ def _as_disjunct(f, t, index):
     quantified = f.is_exists() if t != 'false' else f.is_forall()
     if quantified:
         names, bindings = _quantified_vars(f)
-        return ASPDisjunct(f"({index},{_quantified_id(names)})", parseexpr(f.arg(0), t),
+        return ASPDisjunct(f"({index},{_quantified_id(names)})", parseexpr(f.arg(0), t, context),
                            own_vars=names, extra_bindings=bindings)
-    return ASPDisjunct(str(index), parseexpr(f, t))
+    return ASPDisjunct(str(index), parseexpr(f, t, context))
 
 
-def parseexpr(f, t=None):
+def parseexpr(f, t=None, context=NO_FOLDING):
     """!
     given a FNode from UP representing a fluent and a possible timestep return a
     string representation of it.
+
+    `context` is the task's :class:`~aspplanners.plasp.numeric_terms.NumericContext`
+    -- the per-fluent value scales and the static fluents whose values the
+    grounder may read out of the initial state. It only ever reaches a numeric
+    comparison, and defaults to the no-folding context so that a caller with no
+    task-level knowledge (a test, or the ABA side) gets the plain rational
+    arithmetic this had before folding existed.
     """
     assert isinstance(f, FNode), f"Expected a FNode, got {type(f)}"
     if  f.is_fluent_exp(): # for fluents
@@ -177,27 +190,27 @@ def parseexpr(f, t=None):
         # A negation flips the polarity it is parsed under rather than forcing
         # it, so a double negation (which De Morgan on a nested `not (and ...)`
         # readily produces) cancels instead of staying negative.
-        return parseexpr(f.args[0], 'true' if t == 'false' else 'false')
+        return parseexpr(f.args[0], 'true' if t == 'false' else 'false', context)
     if f.is_implies():
         # `a -> b` is `not a or b`, so restating it that way hands it to the
         # disjunction machinery below (and to De Morgan when it is negated),
         # rather than needing a compiler to have removed it beforehand.
         manager = f.environment.expression_manager
-        return parseexpr(manager.Or(manager.Not(f.arg(0)), f.arg(1)), t)
+        return parseexpr(manager.Or(manager.Not(f.arg(0)), f.arg(1)), t, context)
     negated = t == 'false'
     # A conjunction is what precondition/goal facts *are*, so it just flattens --
     # and so does a `forall`, which is a conjunction over the universe, emitted
     # with its variable left free for the grounder to range (see _arg_term).
     # De Morgan swaps which is which under negation.
     if f.is_and() if not negated else f.is_or():
-        return [parseexpr(arg, t) for arg in f.args]
+        return [parseexpr(arg, t, context) for arg in f.args]
     if f.is_forall() if not negated else f.is_exists():
         # The body's atoms keep the variable free, so every one of them is
         # emitted once per binding -- a conjunction over the universe. A
         # *disjunction* in the body cannot be left free that way, though: it has
         # to become one group per binding, which is what universally_bound
         # records for whoever emits it.
-        parsed = parseexpr(f.arg(0), t)
+        parsed = parseexpr(f.arg(0), t, context)
         names, bindings = _quantified_vars(f)
         for item in flatten_atoms(parsed):
             if isinstance(item, ASPDisjunction):
@@ -207,16 +220,16 @@ def parseexpr(f, t=None):
     # owning action or goal emits as its own orGroup/orDisjunct facts. An
     # `exists` is one too, with the disjuncts indexed by its variables.
     if f.is_or() or f.is_and():
-        return ASPDisjunction([_as_disjunct(arg, t, i) for i, arg in enumerate(f.args)])
+        return ASPDisjunction([_as_disjunct(arg, t, i, context) for i, arg in enumerate(f.args)])
     if f.is_exists() or f.is_forall():
         names, bindings = _quantified_vars(f)
-        return ASPDisjunction([ASPDisjunct(_quantified_id(names), parseexpr(f.arg(0), t),
+        return ASPDisjunction([ASPDisjunct(_quantified_id(names), parseexpr(f.arg(0), t, context),
                                            own_vars=names, extra_bindings=bindings)])
     if f.is_lt() or f.is_le():
-        cmp = ASPNumComparison(f, 'lt' if f.is_lt() else 'le')
+        cmp = ASPNumComparison(f, 'lt' if f.is_lt() else 'le', context)
         return cmp.negated() if t == 'false' else cmp
     if f.is_equals() and (_is_numeric_fnode(f.args[0]) or _is_numeric_fnode(f.args[1])):
-        cmp = ASPNumComparison(f, 'eq')
+        cmp = ASPNumComparison(f, 'eq', context)
         return cmp.negated() if t == 'false' else cmp
     if f.is_equals():
         lhs, rhs = f.args[0], f.args[1]
@@ -303,11 +316,6 @@ def _equality_value_term(arg):
 # clear of an action parameter that happens to share its name.
 QUANTIFIED_PREFIX = 'Q_'
 
-# Fresh ASP variables binding a *static* fluent's value in an effect's rule body,
-# so the delta can be arithmetic the grounder does rather than a coefficient the
-# encoding has to state (see `_fold_static_effect_terms`).
-STATIC_EFFECT_PREFIX = 'RAWEFF'
-
 
 def _arg_term(arg):
     # Returns (term_str, asp_type, kind). Objects become `constant("name")`
@@ -372,10 +380,19 @@ def _constant_value(f):
 
 
 # A linear form is `(terms, constant)`: `terms` maps a fluent's rendered ASP term
-# to its `(ASPExpr, Fraction coefficient)` pair -- keyed by the rendering so the
+# to its `(ASPExpr, Coeff coefficient)` pair -- keyed by the rendering so the
 # same fluent occurring twice accumulates rather than duplicating -- and
-# `constant` is the additive rest. Coefficients stay exact rationals until
-# ASPNumComparison multiplies the whole comparison out to integers.
+# `constant` is the additive rest. Coefficients are exact
+# `aspplanners.plasp.numeric_terms.Coeff`s, which is a rational on all but the
+# tasks that read a static fluent's value as a coefficient; they stay exact
+# until ASPNumComparison multiplies the whole comparison out to integers.
+#
+# A form is stated in the task's *own* units, not in the units its values are
+# stored in: a fluent whose values carry a factor (see
+# `rescale.numeric_value_scales`) has that factor divided out of its coefficient
+# here, and multiplied back in by whoever states a *value* -- an effect's delta
+# or assignment. A comparison needs no such move, since multiplying both its
+# sides through by the common denominator clears the factor exactly.
 
 def _lin_add(left, right):
     terms = dict(left[0])
@@ -388,57 +405,121 @@ def _lin_add(left, right):
 
 
 def _lin_scale(form, factor):
+    """`form` times `factor`, which may be a Fraction/int or a :class:`Coeff`."""
+    factor = factor if isinstance(factor, Coeff) else Coeff.rational(factor)
     return ({key: (expr, coefficient * factor)
              for key, (expr, coefficient) in form[0].items()},
             form[1] * factor)
 
 
-def _linear_form(f):
+def _fold_statics(form, context):
+    """`form` restated with every fluent term folded into its constant, or None.
+
+    A product is linear as soon as one of its factors reads nothing but *static*
+    fluents, because a static fluent's value is whatever the initial state says
+    and the grounder can look it up once per parameter binding -- zenotravel's
+    ``(* (distance ?c1 ?c2) (slow-burn ?a))`` is a number by the time the rule
+    grounds. Returns None when the form reads a fluent some action writes, which
+    is the genuinely non-linear case.
+
+    The lookup binds the fluent's *stored* value and the coefficient it replaces
+    had already been divided by that fluent's factor, so the two meet in the
+    task's own units and the fold introduces no factor of its own. Whether the
+    denominator that leaves can be stated exactly is not decided here: a
+    comparison multiplies it through and never has to, and an effect that does
+    is refused by :meth:`Coeff.render` with the effect named.
+    """
+    constant = form[1]
+    for expr, coefficient in form[0].values():
+        if coefficient.is_zero():
+            continue
+        fluent = expr.up_expr.fluent()
+        if not context.is_static(fluent.name):
+            return None
+        constant = constant + coefficient * context.fold(
+            str(expr), str(expr), fluent.name, expr.bindings)
+    return {}, constant
+
+
+def _linear_form(f, context=NO_FOLDING):
     """Normalize a numeric expression to the linear form ``(terms, constant)``.
 
     Covers everything PDDL's simple-numeric fragment can state that an integer
     encoding represents exactly: constants, numeric fluents, sums, differences,
     and products/quotients where at most one factor is non-constant -- so
     ``(+ (x ?b) (y ?b))``, ``(- (y ?b) (x ?b))`` and ``(* 2 (x ?f))`` are all
-    linear forms rather than the special cases they used to be. What is left out
-    is genuinely non-linear: a product of two fluents, or division by one.
+    linear forms rather than the special cases they used to be.
+
+    A product of two fluents is not linear *as an expression*, but it is linear
+    in the state whenever one side reads only fluents no action writes: their
+    values come out of the initial state, so the grounder settles that side into
+    a number and what is left is an ordinary coefficient. `context` is what
+    names those fluents; with the default no-folding context such a product is
+    refused, exactly as it was before folding existed. What is left out is
+    genuinely non-linear: a product of two fluents the task *writes*, or
+    division by any fluent.
     """
     constant = _constant_value(f)
     if constant is not None:
-        return {}, constant
+        return {}, Coeff.rational(constant)
     if f.is_fluent_exp():
         expr = ASPExpr(f, None)
-        return {str(expr): (expr, Fraction(1))}, Fraction(0)
+        # A fluent's stored values may carry a factor its own effects needed;
+        # the coefficient is in the task's units, so that factor divides out.
+        return ({str(expr): (expr, Coeff.rational(
+            Fraction(1) / context.scale(f.fluent().name)))}, Coeff.ZERO)
     if f.is_plus():
-        form = ({}, Fraction(0))
+        form = ({}, Coeff.ZERO)
         for arg in f.args:
-            form = _lin_add(form, _linear_form(arg))
+            form = _lin_add(form, _linear_form(arg, context))
         return form
     if f.is_minus():
-        return _lin_add(_linear_form(f.args[0]),
-                        _lin_scale(_linear_form(f.args[1]), Fraction(-1)))
+        return _lin_add(_linear_form(f.args[0], context),
+                        _lin_scale(_linear_form(f.args[1], context), Fraction(-1)))
     if f.is_times():
-        form = ({}, Fraction(1))
+        form = ({}, Coeff.ONE)
         for arg in f.args:
-            factor = _linear_form(arg)
+            factor = _linear_form(arg, context)
             if not form[0]:
                 form = _lin_scale(factor, form[1])
             elif not factor[0]:
                 form = _lin_scale(form, factor[1])
             else:
-                raise NotImplementedError(
-                    f"A product of two numeric fluents is not linear and is not "
-                    f"supported by the ASP encoding: {f}")
+                # Both sides read state. If either of them reads only *static*
+                # state the grounder resolves it into a number and the product
+                # is linear after all; otherwise the task is genuinely
+                # non-linear and no integer encoding states it. When both sides
+                # are static the whole product is a number, so both are folded:
+                # leaving one as a term would state it as a coefficient over a
+                # value the encoding then has to divide back down, which is a
+                # denominator it need never have carried.
+                folded_factor = _fold_statics(factor, context)
+                folded_form = _fold_statics(form, context)
+                if folded_factor is not None and folded_form is not None:
+                    form = _lin_scale(folded_form, folded_factor[1])
+                elif folded_factor is not None:
+                    form = _lin_scale(form, folded_factor[1])
+                elif folded_form is not None:
+                    form = _lin_scale(factor, folded_form[1])
+                else:
+                    raise NotImplementedError(
+                        f"A product of two numeric fluents is not linear and is not "
+                        f"supported by the ASP encoding: {f}")
         return form
     if f.is_div():
-        divisor = _linear_form(f.args[1])
+        divisor = _linear_form(f.args[1], context)
         if divisor[0]:
             raise NotImplementedError(
                 f"Dividing by a numeric fluent is not linear and is not supported "
                 f"by the ASP encoding: {f}")
-        if divisor[1] == 0:
+        if not divisor[1].is_rational:
+            raise NotImplementedError(
+                f"Dividing by a static numeric fluent is not supported by the ASP "
+                f"encoding: clingo's division truncates, so the quotient would be "
+                f"rounded rather than exact: {f}")
+        if divisor[1].value == 0:
             raise ZeroDivisionError(f"Division by zero in the numeric expression {f}.")
-        return _lin_scale(_linear_form(f.args[0]), Fraction(1) / divisor[1])
+        return _lin_scale(_linear_form(f.args[0], context), Fraction(1) / divisor[1].value)
     raise NotImplementedError(f"Unsupported numeric term: {f} of type {f.node_type}")
 
 
@@ -580,29 +661,38 @@ class ASPLinearExpr(ASPTerm):
     any number of fluents without the fact's arity depending on how many.
     """
 
-    def __init__(self, terms, constant, context='a numeric comparison'):
+    def __init__(self, terms, constant, where='a numeric comparison', context=NO_FOLDING):
         # A zero coefficient contributes nothing; the rest are sorted by their
-        # rendering so the emitted fact text is stable from run to run.
+        # rendering so the emitted fact text is stable from run to run. A
+        # coefficient that reads a static fluent is a clingo *term* rather than
+        # a number and cannot be range-checked here, because its value is not
+        # known until the grounder evaluates it.
+        self.context = context
+        self.coefficients = [constant] + [coefficient for _expr, coefficient in terms
+                                          if not coefficient.is_zero()]
         self.terms = sorted(
-            ((expr, _in_clingo_range(coefficient, expr))
-             for expr, coefficient in terms if coefficient != 0),
+            ((expr, _render_coefficient(coefficient, expr, context))
+             for expr, coefficient in terms if not coefficient.is_zero()),
             key=lambda term: str(term[0]))
-        # A `str` constant is an already-rendered clingo term -- an effect whose
-        # static fluents were folded into arithmetic over `initialState` lookups
-        # (see `_fold_static_effect_terms`). It cannot be range-checked here
-        # because its value is not known until the grounder evaluates it.
-        self.constant = (constant if isinstance(constant, str)
-                         else _in_clingo_range(constant, context))
+        self.constant = _render_coefficient(constant, where, context)
 
     @property
     def bindings(self):
-        """``has(_, type(...))`` atoms for the quantified variables in this side."""
-        return [binding for expr, _coefficient in self.terms for binding in expr.bindings]
+        """The atoms a rule stating this side has to carry in its body.
+
+        The ``has(_, type(...))`` atoms of its quantified variables -- ranging
+        them over the universe there is what expands a ``forall`` -- and the
+        ``initialState`` lookups of any static fluent its coefficients read,
+        which is what settles a folded product into a number (see
+        :class:`~aspplanners.plasp.numeric_terms.NumericContext`).
+        """
+        return ([binding for expr, _coefficient in self.terms for binding in expr.bindings]
+                + list(self.context.body(*self.coefficients)))
 
     def _terms_term(self):
         if not self.terms:
             return 'none'
-        if len(self.terms) == 1 and self.terms[0][1] == 1:
+        if len(self.terms) == 1 and self.terms[0][1] == '1':
             return str(self.terms[0][0])
         return 'sum(' + ','.join(f'({str(expr)},{coefficient})'
                                  for expr, coefficient in self.terms) + ')'
@@ -641,22 +731,23 @@ class ASPNumComparison(ASPTerm):
     coefficients and constants. That is exact, and it preserves the comparison
     because the factor is positive -- which is what lets a task state
     ``(* 1/2 (x ?f))`` or compare against ``3/2`` even though clingo has only
-    integers. Note this handles fractions *within a comparison* only: a
-    fractional effect delta changes the fluent's value itself and needs the task
-    rescaled instead (see :mod:`aspplanners.plasp.rescale`).
+    integers, and what makes a *comparison* the one place a fluent's storage
+    factor costs nothing (see :mod:`aspplanners.plasp.rescale`). Note this
+    handles fractions within one comparison only: a fractional effect delta
+    changes the fluent's value itself, and is cleared by scaling that fluent.
     """
 
     # Each comparison's complement, so a negated one is encoded as the opposite
     # test rather than needing a `not` the encoding has no place for.
     _NEGATION = {'lt': 'le', 'le': 'lt', 'eq': 'neq', 'neq': 'eq'}
 
-    def __init__(self, f, op):
+    def __init__(self, f, op, context=NO_FOLDING):
         self.up_expr = f
         self.op = op
-        lhs, rhs = _linear_form(f.args[0]), _linear_form(f.args[1])
+        lhs, rhs = _linear_form(f.args[0], context), _linear_form(f.args[1], context)
         whole = _common_denominator(lhs, rhs)
-        self.lhs = _as_linear_expr(_lin_scale(lhs, whole))
-        self.rhs = _as_linear_expr(_lin_scale(rhs, whole))
+        self.lhs = _as_linear_expr(_lin_scale(lhs, whole), context=context)
+        self.rhs = _as_linear_expr(_lin_scale(rhs, whole), context=context)
 
     @property
     def bindings(self):
@@ -683,115 +774,114 @@ class ASPNumComparison(ASPTerm):
         return f'{self.op}, {str(self.lhs)}, {str(self.rhs)}'
 
 
-def _as_linear_expr(form, context='a numeric comparison'):
+def _render_coefficient(coefficient, where, context):
+    """One coefficient or additive constant of a linear form, as a clingo term.
+
+    A plain rational is the integer it has to be by this point -- a comparison
+    has been multiplied through and an effect multiplied by its target's factor
+    -- and is range-checked like any other number the encoding emits. One that
+    reads a static fluent is arithmetic the grounder does instead, so what is
+    checked here is that the division taking the looked-up value back into the
+    task's own units is exact; clingo's ``/`` truncates, and a rounded
+    coefficient would return a wrong plan rather than fail.
+    """
+    if coefficient.is_rational:
+        return str(_in_clingo_range(coefficient.value, where))
+    try:
+        return coefficient.render(1, context.divisors_for([coefficient]))
+    except InexactCoefficient as inexact:
+        raise NotImplementedError(
+            f"{where} reads a static numeric fluent it cannot scale exactly "
+            f"({inexact}); the ASP encoding cannot state it. State the task in units "
+            f"that make the value whole.") from None
+
+
+def _as_linear_expr(form, where='a numeric comparison', context=NO_FOLDING):
     terms, constant = form
     return ASPLinearExpr([(expr, coefficient) for expr, coefficient in terms.values()],
-                         constant, context)
+                         constant, where, context)
 
 
 def _reads_fluents(form):
     """Does this linear form read any fluent (with a surviving coefficient)?"""
-    return any(coefficient != 0 for _expr, coefficient in form[0].values())
+    return any(not coefficient.is_zero() for _expr, coefficient in form[0].values())
 
 
-def _static_addend(variable, coefficient):
-    """``coefficient * variable`` as a clingo arithmetic term.
-
-    The division is exact, so clingo's truncating ``/`` is safe here: every
-    denominator reaching this point is a factor of the task's scale, and the
-    looked-up value is therefore already a multiple of it (see
-    :func:`~aspplanners.plasp.rescale.static_numeric_folds`, which computes the
-    fold plan, folds those denominators into the scale, and checks the values
-    against it before anything is emitted).
-    """
-    numerator, denominator = coefficient.numerator, coefficient.denominator
-    if numerator == 1:
-        term = variable
-    elif numerator == -1:
-        term = f"-{variable}"
-    else:
-        term = f"({numerator}*{variable})"
-    return term if denominator == 1 else f"({term})/{denominator}"
-
-
-def _fold_static_effect_terms(form, static_folds, counter):
-    """Replace a form's *static*-fluent terms with initialState lookups.
-
-    A static fluent -- one no action ever writes -- has a value the grounder can
-    read straight out of the initial state, so a fractional coefficient on it is
-    not a coefficient the encoding has to state: it is arithmetic clingo does
-    once per parameter binding, while grounding. Petrobras' ``(decrease
-    (current_fuel ?sh) (/ (distance ?from ?to) 5))`` is the shape -- ``distance``
-    is a table, not state, so the delta is a number by the time the rule grounds.
-
-    This is the effect-side twin of what :func:`_duration_arithmetic` already
-    does for a duration, and it is confined to the fluents `static_folds` names
-    (only those with a fractional coefficient somewhere, which is exactly the set
-    that used to raise) so a task that encoded before is untouched.
-
-    Returns ``(rest, addends, lookups, bindings)``: the form with those terms
-    dropped, the arithmetic terms replacing them, the ``initialState`` body atoms
-    binding their values, and the ``has(...)`` atoms their arguments need.
-    """
-    rest, addends, lookups, bindings = {}, [], [], []
-    for key, (expr, coefficient) in form[0].items():
-        if coefficient == 0:
-            continue
-        if expr.up_expr.fluent().name not in static_folds:
-            rest[key] = (expr, coefficient)
-            continue
-        variable = f"{STATIC_EFFECT_PREFIX}{counter[0]}"
-        counter[0] += 1
-        lookups.append(f"initialState({str(expr)}, value({str(expr)}, {variable}))")
-        bindings += expr.bindings
-        addends.append(_static_addend(variable, coefficient))
-    return (rest, form[1]), addends, lookups, bindings
-
-
-def _delta_term(constant, addends):
-    """An effect's delta as one clingo term: its constant plus the folded terms."""
-    if not addends:
-        return str(constant)
-    if constant == 0:
-        return ' + '.join(addends)
-    return str(constant) + ' + ' + ' + '.join(addends)
-
-
-def _effect_expr(form, term, addends=()):
-    """A numeric effect's delta or assigned value as a linear expression.
+def _effect_form(form, term, target_scale, context):
+    """An effect's linear form, in the units its target's values are stored in.
 
     A comparison clears a fractional coefficient by multiplying the whole
     comparison through, which preserves it exactly (see ASPNumComparison). An
-    effect has no such move: multiplying it through would change the fluent's
-    value, and the task-wide rescale scales values, not coefficients, so
-    ``(increase (x) (/ (y) 2))`` stays fractional under any factor. Rejected
-    here, ahead of ASPLinearExpr's own range check, for the sharper message.
+    effect has no such move -- multiplying it through would change the fluent's
+    value -- so the factor that clears it is the *target's own* storage factor,
+    chosen for exactly this by
+    :func:`~aspplanners.plasp.rescale.numeric_value_scales`. Multiplying by it
+    here is what turns ``(increase (x ?b) (* 1.5 (v ?b)))`` into the whole
+    coefficient 3 on a doubly-stored ``x``.
 
-    A fractional coefficient on a *static* fluent is the exception, and it has
-    already been folded out of `form` into `addends` by the caller -- what is
-    left is the part the encoding really does have to state.
+    A coefficient still fractional after that is one no scaling of the task
+    reaches -- ``(increase (v) (* 0.9 (v)))`` demands a finer grid at every step
+    -- and is refused here, ahead of ASPLinearExpr's own range check, for the
+    sharper message.
     """
-    for expr, coefficient in form[0].values():
-        if coefficient != 0 and coefficient.denominator != 1:
+    scaled = _lin_scale(form, target_scale)
+    for expr, coefficient in scaled[0].values():
+        if coefficient.is_zero() or not coefficient.is_rational:
+            continue
+        if coefficient.value.denominator != 1:
             raise NotImplementedError(
                 f"The numeric effect on {term} reads {expr} with the fractional "
-                f"coefficient {coefficient}, which no rescaling of the task can "
-                f"make whole (scaling moves the values, not the coefficients) and "
-                f"{expr} is not static, so its value cannot be folded in at "
-                f"grounding time either; the ASP encoding cannot state it. State "
-                f"the task in units that make the coefficient integral.")
-    context = f'the numeric effect on {term}'
-    if not addends:
-        return _as_linear_expr(form, context=context)
-    # The folded terms ride in the expression's additive constant, which is then
-    # a clingo term rather than a literal -- the grounder evaluates it to the
-    # same number `numConst`/`numValue` would have carried. The constant they
-    # join is range-checked here rather than by ASPLinearExpr, which cannot see
-    # inside the term it is handed.
-    terms, constant = form
-    return ASPLinearExpr([(expr, coefficient) for expr, coefficient in terms.values()],
-                         _delta_term(_in_clingo_range(constant, context), addends),
-                         context)
+                f"coefficient {coefficient.value}, which no scaling of the task can "
+                f"make whole -- {expr}'s own values would have to be scaled with it, "
+                f"and the effect asks for a finer grid than that leaves. The ASP "
+                f"encoding cannot state it; state the task in units that make the "
+                f"coefficient integral.")
+    return scaled
+
+
+def _fold_fractional_statics(form, context):
+    """Resolve a form's *static* terms whose coefficient is not whole.
+
+    Petrobras' ``(decrease (current_fuel ?sh) (/ (distance ?from ?to) 5))`` is
+    the shape: ``distance`` is a table rather than state, so rather than store
+    ``current_fuel`` five times finer just to make the 1/5 a whole coefficient,
+    the grounder reads the distance out of the initial state and works the
+    delta out itself, once per parameter binding. The effect is then a constant
+    ``numEffect`` -- no reified ``numValue`` per reachable value -- which is the
+    difference between grounding that domain and not.
+
+    The scale of the effect's target is what makes the arithmetic exact: it was
+    chosen so that ``S_t * coefficient / S_g`` is a whole number
+    (:func:`~aspplanners.plasp.rescale.numeric_value_scales`), so the folded
+    monomial multiplies the looked-up value by an integer and divides by
+    nothing. Confined to the terms that are *not* whole, so a task whose static
+    reads all have integer coefficients emits exactly the facts it did before.
+    """
+    terms, constant = {}, form[1]
+    for key, (expr, coefficient) in form[0].items():
+        fractional = (coefficient.is_rational
+                      and coefficient.value.denominator != 1)
+        if not fractional or not context.is_static(expr.up_expr.fluent().name):
+            terms[key] = (expr, coefficient)
+            continue
+        name = expr.up_expr.fluent().name
+        constant = constant + coefficient * context.fold(
+            str(expr), str(expr), name, expr.bindings)
+    return terms, constant
+
+
+def _effect_expr(form, term, target_scale, context):
+    """A numeric effect's delta or assigned value as a linear expression."""
+    where = f'the numeric effect on {term}'
+    return _as_linear_expr(_effect_form(form, term, target_scale, context),
+                           where=where, context=context)
+
+
+def _effect_constant(form, term, target_scale, context):
+    """A numeric effect's delta or assigned value when it reads no state."""
+    where = f'the numeric effect on {term}'
+    return _render_coefficient(_effect_form(form, term, target_scale, context)[1],
+                               where, context)
 
 
 class ASPGroundedFluent(ASPTerm):
@@ -803,39 +893,6 @@ class ASPGroundedFluent(ASPTerm):
     def __str__(self):
         _ret_str = f"{self._head}," + ','.join(str(a) for a in self._arity) if len(self._arity) > 0 else f"{self._head}"
         return f'variable(({_ret_str}))'
-
-
-def _conditional_effect_value(eff, action_name, term):
-    """The value a conditional effect's ``postcondition`` fact assigns.
-
-    A conditional effect rides on ``postcondition``/``caused``, which states the
-    variable's new value outright. A boolean one is that value; so is a numeric
-    *assignment* of a constant, since a numeric variable's value travels on the
-    same ``holds`` chain (``numval/3`` projects it).
-
-    The two shapes that path cannot state are refused here rather than encoded
-    into something else: an increase/decrease, whose new value is the old one
-    plus a delta (``numEffect`` reads that off ``occurs/2``, where a condition
-    has nowhere to go), and an assignment reading the state, which has to be
-    evaluated at the step before (``numAssignExpr``, same problem).
-    """
-    if eff.fluent.type.is_bool_type():
-        return str(eff.value).lower()
-    if eff.kind in (EffectKind.INCREASE, EffectKind.DECREASE):
-        raise NotImplementedError(
-            f"The conditional numeric effect {eff} of action {action_name!r} is not "
-            f"supported: an increase/decrease is applied by numEffect, which the "
-            f"encoding reads off occurs/2 with no room for the effect's condition. "
-            f"State it as a conditional assignment of a constant, or lift the "
-            f"condition into the action's precondition.")
-    form = _linear_form(eff.value)
-    if _reads_fluents(form):
-        raise NotImplementedError(
-            f"The conditional numeric effect {eff} of action {action_name!r} is not "
-            f"supported: its assigned value reads the state, which numAssignExpr "
-            f"evaluates off occurs/2 with no room for the effect's condition. Only "
-            f"a constant assignment can be made conditional.")
-    return _in_clingo_range(form[1], f'the numeric effect on {term}')
 
 
 def _effect_bindings(eff, target):
@@ -933,7 +990,7 @@ def _or_facts(disjunction, gid, owner=None, body_prefix=(), scope_vars=(),
 
 
 class ASPAction(ASPTerm):
-    def __init__(self, a, static_fluents=None, signature_guard=None, static_folds=None):
+    def __init__(self, a, static_fluents=None, signature_guard=None, context=NO_FOLDING):
         # static_fluents: set of fluent names whose value is fixed by the
         # initial state (no action has them in its effects). Positive
         # preconditions on these are folded into the action signature body
@@ -948,14 +1005,11 @@ class ASPAction(ASPTerm):
         # passes its start snap's declaration atom, which is both tighter (the
         # start's folded static preconditions carry over) and sound -- an end
         # snap can only ever fire for a binding whose start exists.
-        # static_folds: the subset of those fluents whose value an effect reads
-        # with a fractional coefficient, which is therefore looked up in the
-        # initial state at grounding time rather than stated as a coefficient
-        # (see `_fold_static_effect_terms`). Computed by rescale, which also puts
-        # the task's scale on a grid that makes the arithmetic exact.
+        # context: the task's numeric facts -- the storage factor of each
+        # fluent's values and which of them a product may resolve out of the
+        # initial state (see aspplanners.plasp.numeric_terms.NumericContext).
         static_fluents = static_fluents or set()
-        self._static_folds = static_folds or {}
-        self._fold_counter = [0]
+        self.context = context
         self.up_action = a
         # Fluents this action reads as *false*, whose `holds(V, value(V,false))`
         # chain therefore has to exist from step 0 on (see the encoder).
@@ -973,7 +1027,7 @@ class ASPAction(ASPTerm):
         group_index = 0
         for precondition in a.preconditions:
             # And-within-And nesting yields nested lists — flatten them.
-            variablelist = flatten_atoms(parseexpr(precondition))
+            variablelist = flatten_atoms(parseexpr(precondition, context=self.context))
             for variable in variablelist:
                 if isinstance(variable, ASPDisjunction):
                     self._preconditions += self._disjunction_facts(variable, group_index)
@@ -1021,33 +1075,55 @@ class ASPAction(ASPTerm):
         # fluent terms stays the numEffect/numAssign integer it always was; one
         # that reads fluents becomes a numEffectExpr/numAssignExpr, whose
         # expression the encoding evaluates against the step before.
-        num_deltas = {}    # fluent term -> summed linear-form delta
+        num_deltas = {}    # fluent term -> (summed linear-form delta, scale)
         num_bindings = {}  # fluent term -> the has(...) atoms its rules need
+        # An unconditional delta cannot ride on numEffect while a conditional one
+        # on the same fluent rides on the numeric layer's sum: they would be two
+        # `caused` atoms carrying two different new values, which is not a state.
+        # So once this action has any conditional delta, all of its deltas go
+        # through the sum -- under an effect term with no condition, which fires
+        # whenever the action does. An action with none is untouched.
+        conditional_deltas = any(
+            not e.fluent.type.is_bool_type() and e.kind in (EffectKind.INCREASE,
+                                                            EffectKind.DECREASE)
+            for e in a.conditional_effects)
+        # Each of them gets a term of its own rather than one shared "no
+        # condition" term, because the sum is keyed by (delta, term): two deltas
+        # that happen to be equal -- `forall ?o . w(?o) += 2` alongside
+        # `w(d) += 2` -- would otherwise be one element and count once.
+        unconditional_terms = {}
+
+        def unconditional_term(term):
+            return unconditional_terms.setdefault(
+                term, f'effect((uncond,"{asp_name(a.name)}",{len(unconditional_terms)}))')
         for eff in a.unconditional_effects:
             target = parseexpr(eff.fluent)
             quantified = _effect_bindings(eff, target)
             if eff.kind in (EffectKind.INCREASE, EffectKind.DECREASE):
                 term = str(target)
-                form = _linear_form(eff.value)
+                form = _linear_form(eff.value, self.context)
                 if eff.kind == EffectKind.DECREASE:
                     form = _lin_scale(form, Fraction(-1))
-                num_deltas[term] = _lin_add(num_deltas[term], form) if term in num_deltas else form
+                previous = num_deltas.get(term)
+                num_deltas[term] = (_lin_add(previous[0], form) if previous else form,
+                                    self.context.scale(eff.fluent.fluent().name))
                 num_bindings[term] = _dedup(num_bindings.get(term, []) + quantified)
                 continue
             if eff.kind == EffectKind.ASSIGN and not eff.fluent.type.is_bool_type():
                 term = str(target)
-                form, addends, lookups, folded = self._fold_statics(_linear_form(eff.value))
+                scale = self.context.scale(eff.fluent.fluent().name)
+                form = _fold_fractional_statics(_linear_form(eff.value, self.context),
+                                                self.context)
                 if _reads_fluents(form):
-                    expr = _effect_expr(form, term, addends)
-                    body = _dedup([f'action({self._head})'] + quantified + folded
-                                  + expr.bindings + lookups)
+                    expr = _effect_expr(form, term, scale, self.context)
+                    body = _dedup([f'action({self._head})'] + quantified + expr.bindings)
                     head = f"numAssignExpr({self._head}, {term}, {str(expr)})"
                     self._postconditions.append(f"{head} :- {', '.join(body)}.")
                     self._postconditions += expr.declaration_rules(body)
                 else:
-                    value = _delta_term(
-                        _in_clingo_range(form[1], f'the numeric effect on {term}'), addends)
-                    body = _dedup([f'action({self._head})'] + quantified + folded + lookups)
+                    value = _effect_constant(form, term, scale, self.context)
+                    body = _dedup([f'action({self._head})'] + quantified
+                                  + list(self.context.body(form[1])))
                     head = f"numAssign({self._head}, {term}, {value})"
                     self._postconditions.append(f"{head} :- {', '.join(body)}.")
                 continue
@@ -1058,24 +1134,28 @@ class ASPAction(ASPTerm):
             # condition does; the caused/3 rule then fires once per binding.
             body = ', '.join(_dedup([f'action({self._head})'] + quantified))
             self._postconditions.append(f"{head} :- {body}.")
-        for term, form in num_deltas.items():
+        for term, (form, scale) in num_deltas.items():
             quantified = num_bindings.get(term, [])
-            form, addends, lookups, folded = self._fold_statics(form)
+            form = _fold_fractional_statics(form, self.context)
             if _reads_fluents(form):
-                expr = _effect_expr(form, term, addends)
-                body = _dedup([f'action({self._head})'] + quantified + folded
-                              + expr.bindings + lookups)
-                head = f"numEffectExpr({self._head}, {term}, {str(expr)})"
+                expr = _effect_expr(form, term, scale, self.context)
+                body = _dedup([f'action({self._head})'] + quantified + expr.bindings)
+                head = (f"numCondEffectExpr({self._head}, {unconditional_term(term)}, "
+                        f"{term}, {str(expr)})" if conditional_deltas
+                        else f"numEffectExpr({self._head}, {term}, {str(expr)})")
                 self._postconditions.append(f"{head} :- {', '.join(body)}.")
                 self._postconditions += expr.declaration_rules(body)
                 continue
-            constant = _in_clingo_range(form[1], f'the numeric effect on {term}')
             # A delta of a literal 0 is no effect at all; one that is only
-            # *arithmetic* over folded lookups is not known to be zero here.
-            if constant == 0 and not addends:
+            # *arithmetic* over a folded lookup is not known to be zero here.
+            if form[1].is_zero():
                 continue
-            body = _dedup([f'action({self._head})'] + quantified + folded + lookups)
-            head = f"numEffect({self._head}, {term}, {_delta_term(constant, addends)})"
+            value = _effect_constant(form, term, scale, self.context)
+            body = _dedup([f'action({self._head})'] + quantified
+                          + list(self.context.body(form[1])))
+            head = (f"numCondEffect({self._head}, {unconditional_term(term)}, {term}, "
+                    f"{value})" if conditional_deltas
+                    else f"numEffect({self._head}, {term}, {value})")
             self._postconditions.append(f"{head} :- {', '.join(body)}.")
 
         # Conditional effects (`when C then F := V`). The existential/sequential
@@ -1090,7 +1170,6 @@ class ASPAction(ASPTerm):
         params_tail = (',' + ','.join(p[0] for p in self.signature)) if self.signature else ''
         for idx, eff in enumerate(a.conditional_effects):
             variable = parseexpr(eff.fluent)
-            value    = _conditional_effect_value(eff, a.name, str(variable))
             # A `forall` conditional effect is one effect per binding of its
             # variables, so the bindings index the effect term. Sharing a single
             # term across them would be a different task: caused/3 fires an
@@ -1100,16 +1179,12 @@ class ASPAction(ASPTerm):
             forall_names, forall_bindings = _variable_terms(eff.forall)
             effect_tail = params_tail + (',' + ','.join(forall_names) if forall_names else '')
             effect_term = f'effect((cond,"{asp_name(a.name)}",{idx}{effect_tail}))'
-            head = (
-                f"postcondition({self._head}, {effect_term}, "
-                f"{str(variable)}, value({str(variable)}, {value}))"
-            )
             # Every rule that names the effect term has to range the quantified
             # variables in it, whether or not this particular rule's own atoms
             # mention them -- they are what tells the bindings' effects apart.
             effect_body = _dedup([f'action({self._head})'] + forall_bindings)
 
-            condition_atoms = flatten_atoms(parseexpr(eff.condition))
+            condition_atoms = flatten_atoms(parseexpr(eff.condition, context=self.context))
             # An equality in the condition gates the effect by not declaring its
             # postcondition at all, so it is folded into that one rule's body
             # (and only it: a precondition of an effect that has no
@@ -1119,8 +1194,8 @@ class ASPAction(ASPTerm):
             equalities = [ca for ca in condition_atoms if isinstance(ca, ASPEquality)]
             equality_body = [b for ca in equalities for b in ca.bindings] \
                 + [str(ca) for ca in equalities]
-            self._postconditions.append(
-                f"{head} :- {', '.join(_dedup(effect_body + list(variable.bindings) + equality_body))}.")
+            self._postconditions += self._conditional_effect_facts(
+                a, eff, effect_term, effect_body, variable, equality_body)
 
             cond_group_index = 0
             for ca in condition_atoms:
@@ -1137,10 +1212,18 @@ class ASPAction(ASPTerm):
                     cond_group_index += 1
                     continue
                 if isinstance(ca, ASPNumComparison):
-                    raise NotImplementedError(
-                        f"Numeric condition {ca.up_expr} on a conditional effect of action "
-                        f"{a.name!r} is not supported: the encoding's caused/3 rule reads an "
-                        "effect's conditions off precondition/3, which is not numeric.")
+                    # An effect's conditions are read conjunctively off
+                    # precondition/3, which is not numeric -- but a group of the
+                    # effect term is required just as conjunctively, so a
+                    # comparison is stated as the one-disjunct group holding it.
+                    # No new rule anywhere: the disjunctive layer judges it with
+                    # the same difference #sum it judges a disjunct's numeric
+                    # literal with, and caused/3 already demands every group.
+                    self._postconditions += _or_facts(
+                        ASPDisjunction([ASPDisjunct('0', ca)]), str(cond_group_index),
+                        owner=effect_term, body_prefix=effect_body)
+                    cond_group_index += 1
+                    continue
                 if isinstance(ca, ASPExpr) and ca.up_expr.is_fluent_exp() and ca.value == 'false':
                     self.negated_fluents.add(ca.up_expr._content.payload.name)
                 cond_head = (
@@ -1156,15 +1239,53 @@ class ASPAction(ASPTerm):
                 body = ', '.join(_dedup(effect_body + list(ca.bindings)))
                 self._postconditions.append(f"{cond_head} :- {body}.")
 
-    def _fold_statics(self, form):
-        """`_fold_static_effect_terms` against this action's fold plan.
+    def _conditional_effect_facts(self, a, eff, effect_term, effect_body, variable,
+                                  equality_body):
+        """The rules assigning one conditional effect's value, by its shape.
 
-        A no-op -- and the identical form back -- for a task with no fold plan,
-        which is every task that encoded before this existed.
+        A boolean effect and a numeric *assignment of a constant* state the
+        variable's new value outright, so they ride on core's
+        ``postcondition``/``caused`` and this is one rule. The rest cannot: a
+        delta's new value is the old one plus something, and two deltas that
+        both fire have to add rather than each state a state. They get the
+        numeric layer's own conditional vocabulary, which collects the firing
+        deltas and applies their sum once (see ``encodings/seq/numeric.lp``).
         """
-        if not self._static_folds:
-            return form, [], [], []
-        return _fold_static_effect_terms(form, self._static_folds, self._fold_counter)
+        term = str(variable)
+        body = _dedup(effect_body + list(variable.bindings) + equality_body)
+        scale = self.context.scale(eff.fluent.fluent().name) \
+            if not eff.fluent.type.is_bool_type() else 1
+
+        if eff.fluent.type.is_bool_type() or eff.kind == EffectKind.ASSIGN:
+            form = None if eff.fluent.type.is_bool_type() else \
+                _fold_fractional_statics(_linear_form(eff.value, self.context), self.context)
+            if form is None or not _reads_fluents(form):
+                value = (str(eff.value).lower() if eff.fluent.type.is_bool_type()
+                         else _effect_constant(form, term, scale, self.context))
+                extra = [] if form is None else list(self.context.body(form[1]))
+                head = (f"postcondition({self._head}, {effect_term}, "
+                        f"{term}, value({term}, {value}))")
+                return [f"{head} :- {', '.join(_dedup(body + extra))}."]
+            expr = _effect_expr(form, term, scale, self.context)
+            head = f"numCondAssignExpr({self._head}, {effect_term}, {term}, {str(expr)})"
+            rule_body = _dedup(body + expr.bindings)
+            return ([f"{head} :- {', '.join(rule_body)}."]
+                    + expr.declaration_rules(rule_body))
+
+        form = _linear_form(eff.value, self.context)
+        if eff.kind == EffectKind.DECREASE:
+            form = _lin_scale(form, Fraction(-1))
+        form = _fold_fractional_statics(form, self.context)
+        if _reads_fluents(form):
+            expr = _effect_expr(form, term, scale, self.context)
+            head = f"numCondEffectExpr({self._head}, {effect_term}, {term}, {str(expr)})"
+            rule_body = _dedup(body + expr.bindings)
+            return ([f"{head} :- {', '.join(rule_body)}."]
+                    + expr.declaration_rules(rule_body))
+        delta = _effect_constant(form, term, scale, self.context)
+        rule_body = _dedup(body + list(self.context.body(form[1])))
+        return [f"numCondEffect({self._head}, {effect_term}, {term}, {delta}) :- "
+                f"{', '.join(rule_body)}."]
 
     def _disjunction_facts(self, disjunction, index):
         """orGroup/orDisjunct facts for one disjunctive precondition.
@@ -1276,7 +1397,7 @@ class ASPDurativeAction(ASPTerm):
     """
 
     def __init__(self, da, start_name, end_name, duration_bounds, overall_conditions,
-                 duration_scales=None):
+                 duration_scales=None, context=NO_FOLDING):
         self.up_action = da
         signature = _signature(da.parameters)
         self._head  = f"durative({_head_term(da.name, signature)})"
@@ -1308,9 +1429,12 @@ class ASPDurativeAction(ASPTerm):
             self._duration_body = ', '.join(
                 lookups + [f"DURATION = {term}", "DURATION > 0"])
 
+        # Each over-all fact is `(head, extra body atoms)`: a numeric one whose
+        # coefficients read a static fluent needs that lookup in its body, the
+        # same way a numeric precondition does.
         self._overall = []
         for condition in overall_conditions:
-            atoms = parseexpr(condition)
+            atoms = parseexpr(condition, context=context)
             atoms = [atoms] if not isinstance(atoms, list) else atoms
             while any(isinstance(a, list) for a in atoms):
                 atoms = [e for a in atoms for e in (a if isinstance(a, list) else [a])]
@@ -1318,11 +1442,13 @@ class ASPDurativeAction(ASPTerm):
                 if isinstance(atom, ASPNumComparison):
                     # The comparison's sides are declared alongside it, guarded
                     # by the same start-snap atom the over-all fact itself is.
-                    self._overall.append(f"numOverall({self._head}, {str(atom)})")
-                    self._overall += atom.declaration_heads()
+                    bindings = _dedup(atom.bindings)
+                    self._overall.append((f"numOverall({self._head}, {str(atom)})", bindings))
+                    self._overall += [(head, bindings) for head in atom.declaration_heads()]
                 elif isinstance(atom, ASPExpr):
-                    self._overall.append(
-                        f"overall({self._head}, {str(atom)}, value({str(atom)}, {atom.value}))")
+                    self._overall.append((
+                        f"overall({self._head}, {str(atom)}, value({str(atom)}, {atom.value}))",
+                        list(atom.bindings)))
                 else:
                     raise NotImplementedError(
                         f"Unsupported over-all condition in durative action "
@@ -1341,7 +1467,8 @@ class ASPDurativeAction(ASPTerm):
             f"snap({self._head}, end, {self._end}) :- {ended}.",
             f"durationValue({self._head}, {self._duration}) :- {duration_body}.",
         ]
-        facts += [f"{atom} :- {started}." for atom in self._overall]
+        facts += [f"{atom} :- {', '.join([started] + bindings)}."
+                  for atom, bindings in self._overall]
         return '\n'.join(facts)
 
 
@@ -1421,13 +1548,17 @@ class ASPNumGoal(ASPTerm):
     standalone ``numGoal(...)`` fact. The encoding rejects any model whose
     numval at the queried timestep violates it.
     """
-    def __init__(self, f):
-        self.cmp = f if isinstance(f, ASPNumComparison) else parseexpr(f)
+    def __init__(self, f, context=NO_FOLDING):
+        self.cmp = f if isinstance(f, ASPNumComparison) else parseexpr(f, context=context)
         assert isinstance(self.cmp, ASPNumComparison), (
             f"ASPNumGoal expects a numeric comparison, got {type(self.cmp)} for {f}"
         )
 
     def __str__(self):
-        # A goal is not guarded by anything, so its sides are plain facts.
-        return '\n'.join([f"numGoal({str(self.cmp)})."] + self.cmp.declaration_rules())
+        # A goal is guarded by nothing, so its sides are plain facts -- unless a
+        # coefficient reads a static fluent, whose value the grounder looks up.
+        body = _dedup(self.cmp.bindings)
+        head = f"numGoal({str(self.cmp)})"
+        tail = f" :- {', '.join(body)}." if body else "."
+        return '\n'.join([f"{head}{tail}"] + self.cmp.declaration_rules(body))
 

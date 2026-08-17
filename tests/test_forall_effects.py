@@ -21,7 +21,7 @@ import pytest
 import aspplanners  # noqa: F401 -- registers both engines
 from unified_planning.engines import PlanGenerationResultStatus as Status
 from unified_planning.io import PDDLReader
-from unified_planning.shortcuts import And, Equals, Not, OneshotPlanner, Or
+from unified_planning.shortcuts import And, Equals, GE, LE, Not, OneshotPlanner, Or
 from unified_planning.model.problem_kind_versioning import LATEST_PROBLEM_KIND_VERSION
 from unified_planning.model import ProblemKind
 
@@ -222,17 +222,76 @@ def test_an_equality_gates_the_postcondition_not_a_disjunct():
         f"the equality gates the wrong rule: {carrying[0]}")
 
 
-def test_a_conditional_numeric_effect_is_refused_not_mis_encoded():
-    """An increase cannot be made conditional: ``numEffect`` is read off
-    ``occurs/2``, where the effect's condition has nowhere to go. It is raised
-    rather than silently encoded as an assignment of the delta."""
+def test_a_conditional_numeric_effect_is_encoded_as_a_gated_delta():
+    """An increase carries its condition on the numeric layer's own vocabulary,
+    not on ``postcondition``: the delta is collected when the effect term fires
+    and applied to the fluent's previous value, so it is a *delta* rather than
+    (as an assignment of it would be) the new value."""
     task = parse_case("briefcase", "problem-carry.pddl")
     tax = task.action("tax")
     tax.clear_effects()
     tax.add_increase_effect(task.fluent("weight")(task.object("d")), 2,
                             condition=task.fluent("in")(task.object("d")))
-    with pytest.raises(NotImplementedError, match="conditional numeric effect"):
-        PLASPPlanner(task)
+    planner = PLASPPlanner(task)
+    facts = planner.task_facts
+    assert 'numCondEffect(action(("tax")), effect((cond,"tax",0)), ' \
+           'variable(("weight",constant("d"))), 2)' in facts
+    # The condition rides on the effect term, exactly as a boolean one does.
+    assert 'precondition(effect((cond,"tax",0)), variable(("in",constant("d"))), ' \
+           'value(variable(("in",constant("d"))), true))' in facts
+    assert planner.compilationlist == []
+
+
+def test_a_forall_conditional_numeric_effect_fires_per_binding():
+    """The hard shape twice over: a numeric delta, gated, under a quantifier.
+    `tax` raises the weight of the objects that are *inside* the briefcase, so
+    the effect has to fire once per binding that satisfies its condition -- and
+    the delta has to be collected per binding, which is what indexing the effect
+    term by the quantified variable buys on the numeric side as well."""
+    task = parse_case("briefcase", "problem-tax.pddl")
+    tax = task.action("tax")
+    quantified = next(e for e in tax.effects if e.is_forall()).forall
+    tax.clear_effects()
+    tax.add_increase_effect(task.fluent("weight")(quantified[0]), 2,
+                            condition=task.fluent("in")(quantified[0]),
+                            forall=quantified)
+    task.clear_goals()
+    # `d` goes in, `k` never does, so one `tax` must move d's weight and not k's.
+    task.add_goal(task.fluent("at-o")(task.object("d"), task.object("office")))
+    task.add_goal(GE(task.fluent("weight")(task.object("d")), 2))
+    task.add_goal(LE(task.fluent("weight")(task.object("k")), 0))
+
+    planner = PLASPPlanner(task)
+    assert any(line.startswith("numCondEffect(") and f"{QUANTIFIED_PREFIX}O)" in line
+               for line in planner.task_facts.splitlines()), \
+        "the delta is not indexed by the quantified variable"
+
+    plan = planner.plan(max_horizon=6)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert sorted(ai.action.name for ai in plan.actions) == ["move", "put-in", "tax"]
+    assert_plan_is_over_original_problem(task, plan)
+
+
+def test_two_equal_deltas_on_one_fluent_are_two_elements_of_the_sum():
+    """`forall ?o . w(?o) += 2` alongside `w(d) += 2` is +4 on `d`, and the two
+    are only distinguishable in the sum by the effect term they carry: keyed by
+    the delta alone they would be one element and count once."""
+    task = parse_case("briefcase", "problem-tax.pddl")
+    tax = task.action("tax")
+    weight, d = task.fluent("weight"), task.object("d")
+    tax.add_increase_effect(weight(d), 2)
+    # A conditional delta anywhere in the action is what routes all of its
+    # deltas through the sum; without one they stay on numEffect.
+    tax.add_increase_effect(weight(d), 0, condition=task.fluent("in")(d))
+    task.clear_goals()
+    task.add_goal(GE(weight(d), 4))
+
+    planner = PLASPPlanner(task)
+    plan = planner.plan(max_horizon=4)
+    assert planner.status == Status.SOLVED_SATISFICING, planner.logs
+    assert [ai.action.name for ai in plan.actions] == ["tax"], (
+        "one tax should be worth 4 on d")
+    assert_plan_is_over_original_problem(task, plan)
 
 
 def test_a_conditional_constant_assignment_is_still_encoded():

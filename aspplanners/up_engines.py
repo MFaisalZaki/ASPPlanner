@@ -24,6 +24,28 @@ from aspplanners.plasp.planner import PLASPPlanner
 from aspplanners.abaplan.planner import ABAPlan
 
 
+def _unsupported_result(engine: str, refusal: NotImplementedError) -> PlanGenerationResult:
+    """A refusal, stated as UP states it.
+
+    `supported_kind` answers for the task's *declared* features and is
+    deliberately broad; a backend also refuses shapes only visible once it reads
+    the task, and clingo refuses programs it cannot represent. All three mean
+    "outside this engine's fragment", which is what UNSUPPORTED_PROBLEM says --
+    so a caller learns it from the result rather than by knowing which exception
+    type to catch. The reason travels in the log messages.
+
+    `NotImplementedError` rather than `UnsupportedTaskError` is caught because
+    that was the convention before the refusal type existed and most raise sites
+    still use it; `UnsupportedTaskError` subclasses it, so both land here.
+    """
+    return PlanGenerationResult(
+        PlanGenerationResultStatus.UNSUPPORTED_PROBLEM,
+        None,
+        engine,
+        log_messages=[LogMessage(LogLevel.INFO,
+                                 f"{engine} cannot encode this task: {refusal}")])
+
+
 class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
     """UP engine adapter for the PLASP/clingo backend (engine name ``PLASPPlanner``).
 
@@ -148,9 +170,12 @@ class UPPLASPPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         time_scale = int(self.conf.get('time_scale', DEFAULT_TIME_SCALE))
         compilationlist = self.conf.get('compilationlist')
 
-        planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
-                               time_scale=time_scale)
-        plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout)
+        try:
+            planner = PLASPPlanner(problem, encoding, compilationlist=compilationlist,
+                                   time_scale=time_scale)
+            plan = planner.plan(horizon=horizon, max_horizon=max_horizon, timeout=timeout)
+        except NotImplementedError as refusal:
+            return _unsupported_result(self.name, refusal)
         status = planner.status
         solved = status == PlanGenerationResultStatus.SOLVED_SATISFICING
         logs = [LogMessage(LogLevel.INFO, message) for message in planner.logs]
@@ -255,8 +280,11 @@ class UPABAPlanner(up.engines.Engine, up.engines.mixins.OneshotPlannerMixin):
         semantics = self.conf.get("semantics", "ST")
         time_scale = int(self.conf.get("time_scale", DEFAULT_TIME_SCALE))
 
-        planner = ABAPlan(problem, time_scale=time_scale)
-        plan = planner.plan(max_horizon=max_horizon, semantics=semantics)
+        try:
+            planner = ABAPlan(problem, time_scale=time_scale)
+            plan = planner.plan(max_horizon=max_horizon, semantics=semantics)
+        except NotImplementedError as refusal:
+            return _unsupported_result(self.name, refusal)
         status = planner.status
         solved = status == PlanGenerationResultStatus.SOLVED_SATISFICING
         logs = [LogMessage(LogLevel.INFO, message) for message in planner.logs]

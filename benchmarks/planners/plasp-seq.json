@@ -1,9 +1,11 @@
 {
     "planner-tag": "PLASPPlanner-seq",
     "up-planner-name": "PLASPPlanner",
+    "up-planner-module": "aspplanners",
     "planner-params": {
         "encoding": "seq",
         "max_horizon": 1000,
         "time_scale": 10
-    }
+    },
+    "tracks": ["classical", "numeric"]
 }

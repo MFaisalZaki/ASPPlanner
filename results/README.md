@@ -1,36 +1,38 @@
 # Benchmark results
 
 The distilled tables of the sweep reported in [§3 of the top-level README](../README.md#3-benchmark-results):
-**13,386 (planner, task) pairs** over 6,738 tasks and 247 domains, run 2026-08-02 → 2026-08-04 through
-the [aspbench](../benchmarks/) harness at 1800 s / 8192 MB per task. Both planners were run over the
-**whole** classical and numeric benchmark this time; the previous sweep ran `ABAPlanner-ST` on a
-3,294-task subset of classical only.
+**6,648 (planner, task) pairs** over 6,648 tasks and 238 domains, run 2026-08-11 → 2026-08-13 through
+the in-tree harness now replaced by [pyPMTEvalToolkit](https://github.com/pyPMT/pyPMTEvalToolkit), at 1800 s / 8192 MB per task. This sweep ran
+`PLASPPlanner-seq` alone, on classical and numeric; `ABAPlanner-ST` and the temporal track were not
+run, so neither appears here.
 
-| | `PLASPPlanner-seq` | `ABAPlanner-ST` |
-|---|---|---|
-| configuration | `encoding=seq`, `max_horizon=1000`, `time_scale=10` | `semantics=ST`, `max_horizon=100`, `time_scale=2` |
-| tracks run | classical, numeric, temporal | classical, numeric (temporal not configured) |
-| tasks attempted | 6,738 | 6,648 |
-| solved & validated | **1,000 / 6,738 (14.8%)** | 334 / 6,648 (5.0%) |
-| of *encodable* tasks | **1,000 / 5,700 (17.5%)** | 334 / 2,323 (14.4%) |
-| median runtime on solved | **10.2 s** | 19.8 s |
-| median peak memory on solved | **148 MB** | 322 MB |
-| median plan length | 10 | 10 |
+| | `PLASPPlanner-seq` |
+|---|---|
+| configuration | `encoding=seq`, `max_horizon=1000`, `time_scale=10` |
+| tracks run | classical, numeric |
+| tasks attempted | 6,648 |
+| solved & validated | **1,047 / 6,648 (15.8%)** |
+| of *encodable* tasks | **1,047 / 5,601 (18.7%)** |
+| median runtime on solved | 8.2 s |
+| median peak memory on solved | 149 MB |
+| median plan length | 10 |
 
 Every `SOLVED` row here passed plan validation against the original problem; nothing else is counted
-as solved. On the 6,648 tasks both planners attempted the union is 1,002 — `ABAPlanner-ST` solves
-**7** tasks `PLASPPlanner-seq` does not.
+as solved.
+
+Against the previous sweep, on the same 6,648 tasks: **995 → 1,047**, the whole of it on the numeric
+track (180 → 228) after the sequential numeric work in `7d21dc2`. 24 domains improved, one regressed
+by a single instance.
 
 ## Layout
 
 | path | contents |
 |---|---|
-| [`results.csv`](results.csv) | **per instance** — every (planner, task) pair, all three tracks, 13,386 rows |
-| [`domains.csv`](domains.csv) | **per domain** — every (planner, domain) pair, all three tracks, 485 rows |
+| [`results.csv`](results.csv) | **per instance** — every (planner, task) pair, both tracks, 6,648 rows |
+| [`domains.csv`](domains.csv) | **per domain** — every (planner, domain) pair, both tracks, 238 rows |
 | [`summary.json`](summary.json) | the headline counts, machine-readable |
 | [`classical/`](classical/) | [README](classical/README.md) · [domains.csv](classical/domains.csv) · [instances.csv](classical/instances.csv) |
 | [`numeric/`](numeric/) | [README](numeric/README.md) · [domains.csv](numeric/domains.csv) · [instances.csv](numeric/instances.csv) |
-| [`temporal/`](temporal/) | [README](temporal/README.md) · [domains.csv](temporal/domains.csv) · [instances.csv](temporal/instances.csv) |
 
 The two top-level tables are the ones to hand to somebody else: `results.csv` is the sweep per
 instance, `domains.csv` the same sweep per domain. The per-track directories are those two split by
@@ -41,9 +43,9 @@ validated, plan length, makespan, parse/solve/total seconds, peak memory, and a 
 everything that did not solve. `domains.csv` aggregates those to one row per (planner, domain): task
 count, coverage, a column per status, and medians over the solved instances.
 
-`temporal/` holds `PLASPPlanner-seq` only: `ABAPlanner-ST`'s planner configuration carries
-`"tracks": ["classical", "numeric"]`, so its temporal tasks were never run. They are absent rather
-than recorded as 0/90, which would read as failure.
+A planner or track that was not run is absent from these files rather than recorded as 0/n, which
+would read as failure. The previous sweep's `ABAPlanner-ST` and temporal tables are in the history of
+this directory, at `dee3e45`.
 
 ## Reading the status column
 
@@ -51,7 +53,7 @@ than recorded as 0/90, which would read as failure.
 |---|---|
 | `SOLVED` | a plan was found **and validated against the original problem** |
 | `UNSUPPORTED` | refused up front — the task's `ProblemKind` is outside `supported_kind()`, or the encoder declined a numeric expression it cannot linearise |
-| `ERROR` | an exception; for `PLASPPlanner-seq` 99.5% of them the **UP PDDL reader**, for `ABAPlanner-ST` the reader plus the Fast Downward grounder it needs |
+| `ERROR` | an exception; 98.6% of them the **UP PDDL reader**, only 9 the planner |
 | `TIMEOUT` | hit the 1800 s task limit |
 | `MEMOUT` | hit the 8 GB task limit |
 | `KILLED` | the scheduler reaped the job before the harness could write a result — read these as timeouts |
